@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<script src="hls-0.13.0.light.min.js"></script>
+	</head>
+	<body>
+		<video id="video-player" controls preload="none"></video>
+		<script>
+			var video = document.getElementById('video-player');
+			if(Hls.isSupported()) {
+				var hls = new Hls();
+				hls.on(Hls.Events.Error, function (event, data) {
+					console.log("HLS error: ", event, data);
+				});
+				hls.attachMedia(video);
+				hls.on(Hls.Events.MEDIA_ATTACHED, function() {
+					hls.loadSource('cctv.m3u8');
+					hls.on(Hls.Events.MANIFEST_PARSED,function() {
+						video.play();
+					});
+				});
+			}
+			else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+				video.src = 'cctv.m3u8';
+				video.addEventListener('loadedmetadata',function() {
+					video.play();
+				});
+			}
+		</script>
+	</body>
+ </html>
