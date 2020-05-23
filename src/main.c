@@ -19,7 +19,7 @@ int main(int argc, char* argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	avInit(AV_LOG_DEBUG);
+	avInit(AV_LOG_WARNING);
 
 	const ZCameraParams params = {
 		.source_url = argv[1],

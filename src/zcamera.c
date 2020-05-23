@@ -25,6 +25,11 @@ struct ZCamera {
 		AVFormatContext *fctx;
 		int stream_mapping[MAX_STREAMS];
 	} hls;
+
+	struct {
+		AVCodecContext *ctx;
+		int skipped_frames;
+	} decode;
 };
 
 
@@ -116,22 +121,6 @@ error:
 	return averror;
 }
 
-static int skipped_frames = 0;
-static void packetCallback(const AVPacket *pkt, const AVStream *stream) {
-	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
-
-	if (!is_video || ((pkt->flags & AV_PKT_FLAG_KEY) == 0)) {
-		++skipped_frames;
-		//return;
-	}
-
-	printf("P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
-		(long long)pkt->pts, (long long)pkt->dts,
-		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, skipped_frames);
-
-	skipped_frames = 0;
-}
-
 static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
 {
     AVRational *time_base = &fmt_ctx->streams[pkt->stream_index]->time_base;
@@ -141,6 +130,52 @@ static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, cons
            av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, time_base),
            av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, time_base),
            pkt->stream_index);
+}
+
+static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
+	const AVStream *stream = cam->in.fctx->streams[pkt->stream_index];
+	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+	if (!is_video || ((pkt->flags & AV_PKT_FLAG_KEY) == 0)) {
+		++cam->decode.skipped_frames;
+		return;
+	}
+
+	if (cam->decode.ctx == NULL) {
+		const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
+		cam->decode.ctx = avcodec_alloc_context3(codec);
+		int averr = avcodec_open2(cam->decode.ctx, codec, NULL);
+		if (averr != 0) {
+			fprintf(stderr, "Error creating decoder: %s", av_err2str(averr));
+			goto error_close;
+		}
+	}
+
+	printf("P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
+		(long long)pkt->pts, (long long)pkt->dts,
+		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, cam->decode.skipped_frames);
+	cam->decode.skipped_frames = 0;
+
+	int averr = avcodec_send_packet(cam->decode.ctx, pkt);
+	if (averr < 0) {
+		fprintf(stderr, "Error decoding frame: %s", av_err2str(averr));
+		// return; ?
+	}
+
+	for (;;) {
+		AVFrame *frame = av_frame_alloc();
+		averr = avcodec_receive_frame(cam->decode.ctx, frame);
+		if (averr == AVERROR(EAGAIN) || averr == AVERROR_EOF)
+			return;
+
+		fprintf(stderr, "F[%d, %dx%d]\n", cam->decode.ctx->frame_number, frame->width, frame->height);
+
+		av_frame_unref(frame);
+	}
+
+error_close:
+	// FIXME stagger errors
+	avcodec_free_context(&cam->decode.ctx);
+	cam->decode.ctx = NULL;
 }
 
 static void readPackets(ZCamera *cam) {
@@ -153,8 +188,7 @@ static void readPackets(ZCamera *cam) {
 			break;
 		}
 
-		// TODO treat the packet
-		packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
+		analyzePacket(cam, &pkt);
 
 		if (!cam->hls.fctx) {
 			openHls(cam);
@@ -170,9 +204,8 @@ static void readPackets(ZCamera *cam) {
 			pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
 			//pkt.pos = -1;
 
-
-			packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
-			log_packet(cam->hls.fctx, &pkt, "out");
+			//packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
+			//log_packet(cam->hls.fctx, &pkt, "out");
 			int averror = av_interleaved_write_frame(cam->hls.fctx, &pkt);
 			if (averror < 0) {
 					fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
