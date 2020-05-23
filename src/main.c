@@ -30,7 +30,10 @@ int main(int argc, char* argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	sleep(10);
+	for (;;) {
+		sleep(1);
+	}
+
 	zCameraDestroy(cam);
 
 	return 0;

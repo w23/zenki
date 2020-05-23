@@ -3,11 +3,14 @@
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/timestamp.h>
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+#define MAX_STREAMS 4
 
 struct ZCamera {
 	void *user_ptr;
@@ -19,8 +22,11 @@ struct ZCamera {
 	} in;
 
 	struct {
+		AVFormatContext *fctx;
+		int stream_mapping[MAX_STREAMS];
 	} hls;
 };
+
 
 static int openCamera(ZCamera *cam) {
 	// TODO: stimeout for rtsp
@@ -37,11 +43,75 @@ static int openCamera(ZCamera *cam) {
 	}
 
 	av_dump_format(cam->in.fctx, 0, cam->in.url, 0);
+
 	// TODO rtsp errors 5xx on this av_read_play(cam->in.fctx);
 	return 0;
 
 error_close:
 	avformat_close_input(&cam->in.fctx);
+	cam->in.fctx = NULL;
+
+error:
+	return averror;
+}
+
+static int openHls(ZCamera *cam) {
+	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", "fixme.m3u8");
+	if (0 != averror) {
+		fprintf(stderr, "Cannot open HLS output: %s\n", cam->in.url, av_err2str(averror));
+		goto error;
+	}
+
+	for (int i = 0; i < MAX_STREAMS; ++i)
+		cam->hls.stream_mapping[i] = -1;
+
+	int mapped_index = 0;
+	for (int i = 0; i < cam->in.fctx->nb_streams; ++i) {
+		if (i >= MAX_STREAMS) {
+			fprintf(stderr, "WARNING: too many streams, stream %d for HLS output will be ignored\n", i);
+			continue;
+		}
+
+		const AVCodecParameters *codecpar = cam->in.fctx->streams[i]->codecpar;
+		if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO && codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
+			continue;
+
+		cam->hls.stream_mapping[i] = mapped_index++;
+
+		AVStream *stream = avformat_new_stream(cam->hls.fctx, NULL);
+		if (!stream) {
+			fprintf(stderr, "ERROR: cannot create new stream for stream %d for HLS output: %s\n", i, av_err2str(averror));
+			goto error_close;
+		}
+
+		averror = avcodec_parameters_copy(stream->codecpar, codecpar);
+		if (averror < 0) {
+			fprintf(stderr, "ERROR: cannot copy codec parameters for stream %d for HLS output: %s\n", i, av_err2str(averror));
+			goto error_close;
+		}
+	}
+
+	AVDictionary *options = NULL;
+	av_dict_set(&options, "hls_flags", "delete_segments+append_list", 0);
+	av_dict_set(&options, "hls_time", "5", 0);
+	av_dict_set(&options, "hls_list_size", "5", 0);
+	av_dict_set(&options, "hls_base_url", "segments/", 0);
+	av_dict_set(&options, "hls_segment_filename", "segments/fixme-%d.ts", 0);
+	
+	averror = avformat_write_header(cam->hls.fctx, &options);
+	av_dict_free(&options);
+	if (averror < 0) {
+			fprintf(stderr, "ERROR: cannot write header for HLS output: %s\n", av_err2str(averror));
+			goto error_close;
+	}
+
+	av_dump_format(cam->hls.fctx, 0, "fixme.m3u8", 1);
+	return 0;
+
+error_close:
+	avformat_free_context(cam->hls.fctx);
+	cam->hls.fctx = NULL;
+
 error:
 	return averror;
 }
@@ -52,7 +122,7 @@ static void packetCallback(const AVPacket *pkt, const AVStream *stream) {
 
 	if (!is_video || ((pkt->flags & AV_PKT_FLAG_KEY) == 0)) {
 		++skipped_frames;
-		return;
+		//return;
 	}
 
 	printf("P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
@@ -60,6 +130,17 @@ static void packetCallback(const AVPacket *pkt, const AVStream *stream) {
 		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, skipped_frames);
 
 	skipped_frames = 0;
+}
+
+static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
+{
+    AVRational *time_base = &fmt_ctx->streams[pkt->stream_index]->time_base;
+    printf("%s: pts:%s pts_time:%s dts:%s dts_time:%s duration:%s duration_time:%s stream_index:%d\n",
+           tag,
+           av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, time_base),
+           av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, time_base),
+           av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, time_base),
+           pkt->stream_index);
 }
 
 static void readPackets(ZCamera *cam) {
@@ -73,8 +154,31 @@ static void readPackets(ZCamera *cam) {
 		}
 
 		// TODO treat the packet
-		//packet_callback(param);
 		packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
+
+		if (!cam->hls.fctx) {
+			openHls(cam);
+		}
+
+		if (cam->hls.fctx && pkt.stream_index < MAX_STREAMS && cam->hls.stream_mapping[pkt.stream_index] >= 0) {
+			AVStream *in_stream = cam->in.fctx->streams[pkt.stream_index];
+			pkt.stream_index = cam->hls.stream_mapping[pkt.stream_index];
+			AVStream *out_stream = cam->hls.fctx->streams[pkt.stream_index];
+
+			pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+			pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+			pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
+			//pkt.pos = -1;
+
+
+			packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
+			log_packet(cam->hls.fctx, &pkt, "out");
+			int averror = av_interleaved_write_frame(cam->hls.fctx, &pkt);
+			if (averror < 0) {
+					fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
+					// FIXME handle error
+			}
+		}
 
 		av_packet_unref(&pkt);
 	}
