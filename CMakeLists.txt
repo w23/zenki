@@ -7,13 +7,17 @@ pkg_check_modules(avutil REQUIRED IMPORTED_TARGET "libavutil")
 pkg_check_modules(avcodec REQUIRED IMPORTED_TARGET "libavcodec")
 find_package(Threads REQUIRED)
 
+add_subdirectory(src/atto)
+
 set(SOURCES
 	src/main.c
 	src/zcamera.c
+	src/texture.c
 )
 
 add_executable(zenki ${SOURCES})
 target_link_libraries(zenki
+	atto
 	Threads::Threads
 	PkgConfig::avformat
 	PkgConfig::avutil

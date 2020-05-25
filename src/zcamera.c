@@ -4,6 +4,7 @@
 #include <libavformat/avio.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/timestamp.h>
+#include <libavutil/pixdesc.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -15,6 +16,9 @@
 struct ZCamera {
 	void *user_ptr;
 	pthread_t thread;
+
+	ZCameraKeyframeTestFunc test_func;
+	void *user;
 
 	struct {
 		char *url;
@@ -102,7 +106,7 @@ static int openHls(ZCamera *cam) {
 	av_dict_set(&options, "hls_list_size", "5", 0);
 	av_dict_set(&options, "hls_base_url", "segments/", 0);
 	av_dict_set(&options, "hls_segment_filename", "segments/fixme-%d.ts", 0);
-	
+
 	averror = avformat_write_header(cam->hls.fctx, &options);
 	av_dict_free(&options);
 	if (averror < 0) {
@@ -132,6 +136,18 @@ static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, cons
            pkt->stream_index);
 }
 
+static enum AVPixelFormat camNegotiateDecodePixelFormat(struct AVCodecContext *s, const enum AVPixelFormat * fmt) {
+	int selected = -1;
+	for (int i = 0; fmt[i] != -1; ++i) {
+		fprintf(stderr, "\t%d %d %s\n", i, fmt[i], av_get_pix_fmt_name(fmt[i]));
+		if (selected != -1 && (fmt[i] == AV_PIX_FMT_YUVJ420P || fmt[i] == AV_PIX_FMT_YUV420P))
+			selected = i;
+	}
+	if (selected == -1) selected = 0;
+	fprintf(stderr, "Selected: %d %s\n", fmt[selected], av_get_pix_fmt_name(fmt[selected]));
+	return fmt[selected];
+}
+
 static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	const AVStream *stream = cam->in.fctx->streams[pkt->stream_index];
 	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
@@ -143,6 +159,7 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	if (cam->decode.ctx == NULL) {
 		const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
 		cam->decode.ctx = avcodec_alloc_context3(codec);
+		cam->decode.ctx->get_format = camNegotiateDecodePixelFormat;
 		int averr = avcodec_open2(cam->decode.ctx, codec, NULL);
 		if (averr != 0) {
 			fprintf(stderr, "Error creating decoder: %s", av_err2str(averr));
@@ -162,14 +179,17 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	}
 
 	for (;;) {
-		AVFrame *frame = av_frame_alloc();
-		averr = avcodec_receive_frame(cam->decode.ctx, frame);
+		AVFrame frame;
+		memset(&frame, 0, sizeof(frame));
+		averr = avcodec_receive_frame(cam->decode.ctx, &frame);
 		if (averr == AVERROR(EAGAIN) || averr == AVERROR_EOF)
 			return;
 
-		fprintf(stderr, "F[%d, %dx%d]\n", cam->decode.ctx->frame_number, frame->width, frame->height);
+		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d]\n", cam->decode.ctx->frame_number, frame.pict_type, av_get_pix_fmt_name(frame.format), frame.width, frame.height);
 
-		av_frame_unref(frame);
+		cam->test_func(cam->user, frame.format, &frame);
+
+		av_frame_unref(&frame);
 	}
 
 error_close:
@@ -178,43 +198,42 @@ error_close:
 	cam->decode.ctx = NULL;
 }
 
-static void readPackets(ZCamera *cam) {
+static int readPacket(ZCamera *cam) {
 	AVPacket pkt;
-	for (;;) {
-		av_init_packet(&pkt);
-		const int result = av_read_frame(cam->in.fctx, &pkt);
-		if (result != 0) {
-			fprintf(stderr, "Error reading frame: %d", result);
-			break;
-		}
-
-		analyzePacket(cam, &pkt);
-
-		if (!cam->hls.fctx) {
-			openHls(cam);
-		}
-
-		if (cam->hls.fctx && pkt.stream_index < MAX_STREAMS && cam->hls.stream_mapping[pkt.stream_index] >= 0) {
-			AVStream *in_stream = cam->in.fctx->streams[pkt.stream_index];
-			pkt.stream_index = cam->hls.stream_mapping[pkt.stream_index];
-			AVStream *out_stream = cam->hls.fctx->streams[pkt.stream_index];
-
-			pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-			pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-			pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
-			//pkt.pos = -1;
-
-			//packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
-			//log_packet(cam->hls.fctx, &pkt, "out");
-			int averror = av_interleaved_write_frame(cam->hls.fctx, &pkt);
-			if (averror < 0) {
-					fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
-					// FIXME handle error
-			}
-		}
-
-		av_packet_unref(&pkt);
+	av_init_packet(&pkt);
+	const int result = av_read_frame(cam->in.fctx, &pkt);
+	if (result != 0) {
+		fprintf(stderr, "Error reading frame: %d", result);
+		return result;
 	}
+
+	analyzePacket(cam, &pkt);
+
+	if (!cam->hls.fctx) {
+		openHls(cam);
+	}
+
+	if (cam->hls.fctx && pkt.stream_index < MAX_STREAMS && cam->hls.stream_mapping[pkt.stream_index] >= 0) {
+		AVStream *in_stream = cam->in.fctx->streams[pkt.stream_index];
+		pkt.stream_index = cam->hls.stream_mapping[pkt.stream_index];
+		AVStream *out_stream = cam->hls.fctx->streams[pkt.stream_index];
+
+		pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+		pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+		pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
+		//pkt.pos = -1;
+
+		//packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
+		//log_packet(cam->hls.fctx, &pkt, "out");
+		int averror = av_interleaved_write_frame(cam->hls.fctx, &pkt);
+		if (averror < 0) {
+				fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
+				// FIXME handle error
+		}
+	}
+
+	av_packet_unref(&pkt);
+	return 0;
 }
 
 static void *zCameraThreadFunc(void *param) {
@@ -222,7 +241,7 @@ static void *zCameraThreadFunc(void *param) {
 
 	for (;;) {
 		if (0 == openCamera(cam)) {
-			readPackets(cam);
+			while (0 == readPacket(cam)) {}
 		}
 
 		// FIXME exit condition
@@ -248,10 +267,20 @@ ZCamera *zCameraCreate(ZCameraParams params) {
 	memset(cam, 0, sizeof(*cam));
 
 	cam->in.url = stringCopy(params.source_url, -1);
+	cam->test_func = params.test_func;
+	cam->user = params.user;
 
-	if (0 != pthread_create(&cam->thread, NULL, zCameraThreadFunc, cam)) {
-		printf("ERROR: Cannot create packet reader thread\n");
-		goto error;
+	const int sync = 1;
+	if (sync) {
+		if (0 != openCamera(cam)) {
+			zCameraDestroy(cam);
+			return NULL;
+		}
+	} else {
+		if (0 != pthread_create(&cam->thread, NULL, zCameraThreadFunc, cam)) {
+			printf("ERROR: Cannot create packet reader thread\n");
+			goto error;
+		}
 	}
 
 	return cam;
@@ -259,6 +288,10 @@ ZCamera *zCameraCreate(ZCameraParams params) {
 error:
 	free(cam);
 	return NULL;
+}
+
+int zCameraPollPacket(ZCamera *cam) {
+	return readPacket(cam);
 }
 
 void zCameraDestroy(ZCamera *cam) {
