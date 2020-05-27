@@ -74,16 +74,13 @@ static void paint(ATimeUs ts, float dt) {
 	glRects(-1, -1, 1, 1);
 }
 
-//int main(int argc, char* argv[]) {
-void attoAppInit(struct AAppProctable* a) {
-	const int argc = a_app_state->argc;
-	const char *const *argv = a_app_state->argv;
+int init(int argc, const char *const *argv) {
 	if (argc != 2) {
 		printf("Usage: %s url\n", argv[0]);
-		aAppTerminate(EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
 
-	avInit(AV_LOG_WARNING);
+	avInit(AV_LOG_ERROR);
 
 	const ZCameraParams params = {
 		.source_url = argv[1],
@@ -93,8 +90,20 @@ void attoAppInit(struct AAppProctable* a) {
 	g.cam = zCameraCreate(params);
 	if (!g.cam) {
 		printf("Failed to create source\n");
-		aAppTerminate(EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
+
+	return 0;
+}
+
+//int main(int argc, char* argv[]) {
+void attoAppInit(struct AAppProctable* a) {
+	const int argc = a_app_state->argc;
+	const char *const *argv = a_app_state->argv;
+	const int ret = init(argc, argv);
+
+	if (ret != 0)
+		aAppTerminate(ret);
 
 	aGLInit();
 	texInit(&g.t);

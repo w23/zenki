@@ -33,6 +33,7 @@ struct ZCamera {
 	struct {
 		AVCodecContext *ctx;
 		int skipped_frames;
+		AVFrame *prev;
 	} decode;
 };
 
@@ -148,6 +149,32 @@ static enum AVPixelFormat camNegotiateDecodePixelFormat(struct AVCodecContext *s
 	return fmt[selected];
 }
 
+static uint64_t byteDifference(const uint8_t *a, const uint8_t *b, int width, int height, int stride) {
+	uint64_t value = 0;
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			const int off = x + y * stride;
+			value += abs((int)(a[off]) - (int)(b[off]));
+		}
+	}
+
+	return value;
+}
+
+static float frameCompare(const AVFrame *a, const AVFrame *b) {
+	if (!a || !b) return -1;
+	if (a->format != b->format) return -2;
+	if (a->width != b->width || a->height != b->height) return -3;
+	if (a->format != AV_PIX_FMT_YUV420P && a->format != AV_PIX_FMT_YUVJ420P) return -4;
+	const float ky = 1.f, ku = 1.f, kv = 1.f;
+	const float
+		ry = byteDifference(a->data[0], b->data[0], a->width, a->height, a->linesize[0]) * ky,
+		ru = byteDifference(a->data[1], b->data[1], a->width/2, a->height/2, a->linesize[1]) * ku,
+		rv = byteDifference(a->data[2], b->data[2], a->width/2, a->height/2, a->linesize[2]) * kv;
+	fprintf(stderr, "delta Y=%f U=%f V=%f sum=%f\n", ry, ru, rv, ry + ru + rv);
+	return ry + ru + rv;
+}
+
 static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	const AVStream *stream = cam->in.fctx->streams[pkt->stream_index];
 	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
@@ -179,17 +206,21 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	}
 
 	for (;;) {
-		AVFrame frame;
-		memset(&frame, 0, sizeof(frame));
-		averr = avcodec_receive_frame(cam->decode.ctx, &frame);
-		if (averr == AVERROR(EAGAIN) || averr == AVERROR_EOF)
+		AVFrame *frame = av_frame_alloc();
+		averr = avcodec_receive_frame(cam->decode.ctx, frame);
+		if (averr == AVERROR(EAGAIN) || averr == AVERROR_EOF) {
+			av_frame_free(&frame);
 			return;
+		}
 
-		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d]\n", cam->decode.ctx->frame_number, frame.pict_type, av_get_pix_fmt_name(frame.format), frame.width, frame.height);
+		const float comparison = frameCompare(cam->decode.prev, frame);
+		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d delta=%f]\n", cam->decode.ctx->frame_number, frame->pict_type, av_get_pix_fmt_name(frame->format), frame->width, frame->height, comparison);
 
-		cam->test_func(cam->user, frame.format, &frame);
+		cam->test_func(cam->user, frame->format, frame);
 
-		av_frame_unref(&frame);
+		av_frame_unref(cam->decode.prev);
+		av_frame_free(&cam->decode.prev);
+		cam->decode.prev = frame;
 	}
 
 error_close:
