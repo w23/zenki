@@ -141,7 +141,7 @@ static enum AVPixelFormat camNegotiateDecodePixelFormat(struct AVCodecContext *s
 	int selected = -1;
 	for (int i = 0; fmt[i] != -1; ++i) {
 		fprintf(stderr, "\t%d %d %s\n", i, fmt[i], av_get_pix_fmt_name(fmt[i]));
-		if (selected != -1 && (fmt[i] == AV_PIX_FMT_YUVJ420P || fmt[i] == AV_PIX_FMT_YUV420P))
+		if (selected == -1 && (fmt[i] == AV_PIX_FMT_YUVJ420P || fmt[i] == AV_PIX_FMT_YUV420P))
 			selected = i;
 	}
 	if (selected == -1) selected = 0;
