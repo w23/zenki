@@ -216,7 +216,8 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 		const float comparison = frameCompare(cam->decode.prev, frame);
 		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d delta=%f]\n", cam->decode.ctx->frame_number, frame->pict_type, av_get_pix_fmt_name(frame->format), frame->width, frame->height, comparison);
 
-		cam->test_func(cam->user, frame->format, frame);
+		if (cam->test_func)
+			cam->test_func(cam->user, frame->format, frame);
 
 		av_frame_unref(cam->decode.prev);
 		av_frame_free(&cam->decode.prev);

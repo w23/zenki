@@ -1,9 +1,11 @@
 #include "zcamera.h"
 #include "texture.h"
 
+#ifdef USE_ATTO
 #include "atto/app.h"
 #define ATTO_GL_H_IMPLEMENT
 #include "atto/gl.h"
+#endif
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -18,6 +20,7 @@ static void avInit(int log_level) {
 	avformat_network_init();
 }
 
+#ifdef USE_ATTO
 static struct {
 	ZCamera *cam;
 	Texture t;
@@ -74,7 +77,7 @@ static void paint(ATimeUs ts, float dt) {
 	glRects(-1, -1, 1, 1);
 }
 
-int init(int argc, const char *const *argv) {
+static int init(int argc, const char *const *argv) {
 	if (argc != 2) {
 		printf("Usage: %s url\n", argv[0]);
 		return EXIT_FAILURE;
@@ -96,7 +99,6 @@ int init(int argc, const char *const *argv) {
 	return 0;
 }
 
-//int main(int argc, char* argv[]) {
 void attoAppInit(struct AAppProctable* a) {
 	const int argc = a_app_state->argc;
 	const char *const *argv = a_app_state->argv;
@@ -119,3 +121,29 @@ void attoAppInit(struct AAppProctable* a) {
 	a->resize = resize;
 }
 
+#else
+
+int main(int argc, char* argv[]) {
+	if (argc != 2) {
+		printf("Usage: %s url\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	avInit(AV_LOG_ERROR);
+
+	const ZCameraParams params = {
+		.source_url = argv[1],
+		.test_func = NULL,
+		.user = NULL,
+	};
+	ZCamera *cam = zCameraCreate(params);
+	if (!cam) {
+		printf("Failed to create source\n");
+		return EXIT_FAILURE;
+	}
+
+	for(;;)	zCameraPollPacket(cam);
+
+	return 0;
+}
+#endif // USE_ATTO
