@@ -14,11 +14,12 @@
 #define MAX_STREAMS 4
 
 struct ZCamera {
-	void *user_ptr;
+	const char *name_m3u8;
+	//void *user_ptr;
 	pthread_t thread;
 
-	ZCameraKeyframeTestFunc test_func;
-	void *user;
+	/* ZCameraKeyframeTestFunc test_func; */
+	/* void *user; */
 
 	struct {
 		char *url;
@@ -66,7 +67,7 @@ error:
 }
 
 static int openHls(ZCamera *cam) {
-	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", "fixme.m3u8");
+	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", cam->name_m3u8);
 	if (0 != averror) {
 		fprintf(stderr, "Cannot open HLS output: %s\n", cam->in.url, av_err2str(averror));
 		goto error;
@@ -216,8 +217,8 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 		const float comparison = frameCompare(cam->decode.prev, frame);
 		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d delta=%f]\n", cam->decode.ctx->frame_number, frame->pict_type, av_get_pix_fmt_name(frame->format), frame->width, frame->height, comparison);
 
-		if (cam->test_func)
-			cam->test_func(cam->user, frame->format, frame);
+		/* if (cam->test_func) */
+		/* 	cam->test_func(cam->user, frame->format, frame); */
 
 		av_frame_unref(cam->decode.prev);
 		av_frame_free(&cam->decode.prev);
@@ -298,22 +299,23 @@ ZCamera *zCameraCreate(ZCameraParams params) {
 	ZCamera *cam = malloc(sizeof(*cam));
 	memset(cam, 0, sizeof(*cam));
 
+	cam->name_m3u8 = stringCopy(params.name_m3u8, -1);
 	cam->in.url = stringCopy(params.source_url, -1);
-	cam->test_func = params.test_func;
-	cam->user = params.user;
+	/* cam->test_func = params.test_func; */
+	/* cam->user = params.user; */
 
-	const int sync = 1;
-	if (sync) {
-		if (0 != openCamera(cam)) {
-			zCameraDestroy(cam);
-			return NULL;
-		}
-	} else {
+	/* const int sync = 1; */
+	/* if (sync) { */
+	/* 	if (0 != openCamera(cam)) { */
+	/* 		zCameraDestroy(cam); */
+	/* 		return NULL; */
+	/* 	} */
+	/* } else { */
 		if (0 != pthread_create(&cam->thread, NULL, zCameraThreadFunc, cam)) {
-			printf("ERROR: Cannot create packet reader thread\n");
+			printf("ERROR: Cannot create camera thread\n");
 			goto error;
 		}
-	}
+	//}
 
 	return cam;
 

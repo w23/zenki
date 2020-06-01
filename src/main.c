@@ -123,26 +123,60 @@ void attoAppInit(struct AAppProctable* a) {
 
 #else
 
+void printUsage(const char *self) {
+		fprintf(stderr, "Usage: %s [-c config] [-v]... rtsp://cam1 [rtsp://cam2]...\n", self);
+}
+
 int main(int argc, char* argv[]) {
-	if (argc != 2) {
-		printf("Usage: %s url\n", argv[0]);
+	int log_level = AV_LOG_FATAL;
+	int opt;
+	const char *config = NULL;
+
+	while ((opt = getopt(argc, argv, "vc:")) != -1) {
+		switch(opt) {
+			case 'c':
+				config = optarg;
+				break;
+			case 'v':
+				log_level += 8; // AV_LOG_ levels are 8 apart
+				break;
+			default: // '?'
+				printUsage(argv[0]);
+				return EXIT_FAILURE;
+		}
+	}
+
+	if (optind == argc) {
+		fprintf(stderr, "No camera URLs supplied\n");
+		printUsage(argv[0]);
 		return EXIT_FAILURE;
 	}
 
-	avInit(AV_LOG_ERROR);
+#define MAX_CAMERAS 4
+	ZCamera *cams[MAX_CAMERAS];
 
-	const ZCameraParams params = {
-		.source_url = argv[1],
-		.test_func = NULL,
-		.user = NULL,
-	};
-	ZCamera *cam = zCameraCreate(params);
-	if (!cam) {
-		printf("Failed to create source\n");
-		return EXIT_FAILURE;
+	int ncameras = (argc - optind) / 2;
+	if (ncameras > MAX_CAMERAS) {
+		fprintf(stderr, "%d urls camera URLs supplied, but only max %d will be used\n", ncameras, MAX_CAMERAS);
+		ncameras = MAX_CAMERAS;
 	}
 
-	for(;;)	zCameraPollPacket(cam);
+	avInit(log_level);
+
+	for (int i = 0; i < ncameras; ++i) {
+		const char *hls = argv[optind + i*2];
+		const char *url = argv[optind + i*2 + 1];
+		const ZCameraParams params = {
+			.name_m3u8 = hls,
+			.source_url = url,
+		};
+		cams[i] = zCameraCreate(params);
+		if (!cams[i]) {
+			fprintf(stderr, "Failed to create source '%s'\n", config);
+		}
+	}
+
+	for(;;) { sleep(1); }
 
 	return 0;
 }
