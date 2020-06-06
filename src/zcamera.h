@@ -24,3 +24,7 @@ typedef struct ZCamera ZCamera;
 ZCamera *zCameraCreate(ZCameraParams);
 //int zCameraPollPacket(ZCamera*);
 void zCameraDestroy(ZCamera*);
+
+
+
+char *stringCopy(const char* src, int len);

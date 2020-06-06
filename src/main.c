@@ -7,12 +7,16 @@
 #include "atto/gl.h"
 #endif
 
+#include <yaml.h>
+
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+#define COUNTOF(a) (sizeof(a) / sizeof(*(a)))
 
 static void avInit(int log_level) {
 	av_log_set_level(log_level);
@@ -123,7 +127,189 @@ void attoAppInit(struct AAppProctable* a) {
 
 #else
 
-void printUsage(const char *self) {
+typedef struct {
+	const char *str;
+	int len;
+} StringView;
+
+int svCmp(StringView a, const char *b) {
+	return strncmp(a.str, b, a.len);
+}
+
+typedef struct {
+	int type;
+	const char *scalar; // NULL == any
+	intptr_t arg1;
+	int stop;
+
+	// return >0 on success, else error (TODO: continue looking/exit semantics?)
+	int (*action)(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1);
+} ExpectedNode;
+
+// returns > 0 on success
+static int yamlParse(yaml_parser_t *parser, intptr_t arg0, const ExpectedNode *nodes, int nodes_num) {
+	int stop = 0;
+	while (!stop) {
+		yaml_event_t event;
+		if (!yaml_parser_parse(parser, &event)) {
+			fprintf(stderr, "Error parsing yaml\n");
+			return 0;
+		}
+
+		switch (event.type) {
+			case YAML_NO_EVENT: fprintf(stderr, "YAML_NO_EVENT\n"); break;
+			case YAML_STREAM_START_EVENT: fprintf(stderr, "YAML_STREAM_START_EVENT\n"); break;
+			case YAML_STREAM_END_EVENT: fprintf(stderr, "YAML_STREAM_END_EVENT\n"); break;
+			case YAML_DOCUMENT_START_EVENT: fprintf(stderr, "YAML_DOCUMENT_START_EVENT\n"); break;
+			case YAML_DOCUMENT_END_EVENT: fprintf(stderr, "YAML_DOCUMENT_END_EVENT\n"); break;
+			case YAML_ALIAS_EVENT: fprintf(stderr, "YAML_ALIAS_EVENT\n"); break;
+			case YAML_SCALAR_EVENT: fprintf(stderr, "YAML_SCALAR_EVENT: %.*s\n", (int)event.data.scalar.length, event.data.scalar.value); break;
+			case YAML_SEQUENCE_START_EVENT: fprintf(stderr, "YAML_SEQUENCE_START_EVENT\n"); break;
+			case YAML_SEQUENCE_END_EVENT: fprintf(stderr, "YAML_SEQUENCE_END_EVENT\n"); break;
+			case YAML_MAPPING_START_EVENT: fprintf(stderr, "YAML_MAPPING_START_EVENT\n"); break;
+			case YAML_MAPPING_END_EVENT: fprintf(stderr, "YAML_MAPPING_END_EVENT\n"); break;
+		}
+
+		int processed = 0;
+		if (event.type == YAML_NO_EVENT) {
+			processed = 1;
+		} else {
+			for (int i = 0; i < nodes_num; ++i) {
+				const ExpectedNode *node = nodes + i;
+				//printf("%d %d E%d\n", i, nodes_num, node->type);
+				if (node->type != event.type)
+					continue;
+
+				if (node->type == YAML_SCALAR_EVENT && node->scalar && 0 != strncmp(node->scalar, (const char*)event.data.scalar.value, event.data.scalar.length))
+					continue;
+
+				if (node->action && 0 >= node->action(parser, &event, arg0, node->arg1)) {
+					yaml_event_delete(&event);
+					return 0;
+				}
+
+				if (node->stop)
+					stop = 1;
+
+				processed = 1;
+				break;
+			}
+		}
+
+		const int event_type = event.type;
+		yaml_event_delete(&event);
+		if (!processed) {
+			fprintf(stderr, "Error: yaml event %d unhandled\n", event_type);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+static const ExpectedNode expectMapping[] = {{.type = YAML_MAPPING_START_EVENT, .stop = 1}};
+static int configParseExpectMapping(yaml_parser_t *parser) {
+	return yamlParse(parser, 0, expectMapping, 1);
+}
+
+static int configParseReadString(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	if (event->type != YAML_SCALAR_EVENT) {
+		fprintf(stderr, "%s expects scalar\n", __FUNCTION__);
+		return 0;
+	}
+
+	*((char**)arg0) = stringCopy((const char*)event->data.scalar.value, event->data.scalar.length);
+	return 1;
+}
+
+static int configParseReadNextString(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	const ExpectedNode nodeReadNextString[] = {{.type = YAML_SCALAR_EVENT, .arg1 = arg1, .action = configParseReadString, .stop = 1}};
+	return yamlParse(parser, arg0, nodeReadNextString, 1);
+}
+
+static const ExpectedNode nodeCameraInput[] = {
+	{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+	{.type = YAML_SCALAR_EVENT, .scalar = "url", .action = configParseReadNextString},
+};
+
+static int configParseCameraInput(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	if (0 >= configParseExpectMapping(parser)) {
+		fprintf(stderr, "Error: camera input should be mapping\n");
+		return 0;
+	}
+
+	char *url = NULL;
+	const int retval = yamlParse(parser, (intptr_t)&url, nodeCameraInput, COUNTOF(nodeCameraInput));
+	fprintf(stderr, "\turl = %s\n", url);
+	free(url);
+	return retval;
+}
+
+static const ExpectedNode ignore[] = {
+	{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+	{.type = YAML_SCALAR_EVENT},
+	{.type = YAML_MAPPING_START_EVENT},
+	{.type = YAML_SEQUENCE_START_EVENT},
+	{.type = YAML_SEQUENCE_END_EVENT},
+};
+
+static int configParseCameraLiveOutput(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	return yamlParse(parser, 0, ignore, COUNTOF(ignore));
+}
+
+static int configParseCameraDetect(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	return yamlParse(parser, 0, ignore, COUNTOF(ignore));
+}
+
+static const ExpectedNode nodeCamera[] = {
+	{.type = YAML_SCALAR_EVENT, .scalar = "input", .action = configParseCameraInput},
+	{.type = YAML_SCALAR_EVENT, .scalar = "output-live", .action = configParseCameraLiveOutput},
+	{.type = YAML_SCALAR_EVENT, .scalar = "basic-detect", .action = configParseCameraDetect},
+	{.type = YAML_MAPPING_START_EVENT},
+	{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+};
+
+static int configParseCamera(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	fprintf(stderr, "Parsing camera %.*s\n", (int)event->data.scalar.length, event->data.scalar.value);
+	return yamlParse(parser, 0/*FIXME cam ptr/index*/, nodeCamera, COUNTOF(nodeCamera));
+}
+
+static const ExpectedNode nodeCameras[] = {
+	{.type = YAML_SCALAR_EVENT, .action = configParseCamera},
+	{.type = YAML_MAPPING_START_EVENT},
+	{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+};
+
+static int configParseCameras(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	return yamlParse(parser, 0, nodeCameras, COUNTOF(nodeCameras));
+}
+
+static const ExpectedNode nodeTop[] = {
+	{.type = YAML_STREAM_START_EVENT},
+	{.type = YAML_DOCUMENT_START_EVENT},
+	{.type = YAML_DOCUMENT_END_EVENT, .stop = 1},
+	{.type = YAML_MAPPING_START_EVENT},
+	{.type = YAML_SCALAR_EVENT, .scalar = "cameras", .action = configParseCameras},
+};
+
+static int readConfig(const char *filename) {
+	FILE *f = fopen(filename, "rb");
+	if (!f) {
+		perror("Cannot open config file");
+		return -errno;
+	}
+
+	yaml_parser_t parser;
+	yaml_parser_initialize(&parser);
+	yaml_parser_set_input_file(&parser, f);
+
+	const int retval = yamlParse(&parser, 0, nodeTop, COUNTOF(nodeTop));
+
+	yaml_parser_delete(&parser);
+	return retval;
+}
+
+static void printUsage(const char *self) {
 		fprintf(stderr, "Usage: %s [-c config] [-v]... rtsp://cam1 [rtsp://cam2]...\n", self);
 }
 
@@ -135,7 +321,10 @@ int main(int argc, char* argv[]) {
 	while ((opt = getopt(argc, argv, "vc:")) != -1) {
 		switch(opt) {
 			case 'c':
-				config = optarg;
+				if (!readConfig(optarg)) {
+					fprintf(stderr, "reading config file %s failed\n", optarg);
+					return EXIT_FAILURE;
+				}
 				break;
 			case 'v':
 				log_level += 8; // AV_LOG_ levels are 8 apart
