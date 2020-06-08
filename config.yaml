@@ -12,8 +12,7 @@ cameras:
         hls_base_url: segments/
         hls_segment_filename: segments/fixme-%d.ts
     basic-detect:
-      coeffs: [1, 1, 1] # Y U V
+      # coeffs: [1, 1, 1] # Y U V
       threshold: 10 # pixel count normalized
       thumbnail: front/event-%Y-%m-%d-%H-%M-%S.jpg # strftime
-      output: # no transcode
-        url: front/event-%Y-%m-%d-%H-%M-%S.mkv # strftime
+      output-url: front/event-%Y-%m-%d-%H-%M-%S.mkv # strftime, no transcode

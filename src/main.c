@@ -238,7 +238,7 @@ static int configParseReadString(yaml_parser_t *parser, const yaml_event_t *even
 		return 0;
 	}
 
-	*((char**)(arg0 + arg1)) = stringCopy((const char*)event->data.scalar.value, event->data.scalar.length);
+	*((char**)(arg0 + arg1)) = strndup((const char*)event->data.scalar.value, event->data.scalar.length);
 	return 1;
 }
 
@@ -247,14 +247,95 @@ static int configSaveNextValue(yaml_parser_t *parser, const yaml_event_t *event,
 	return yamlParse(parser, arg0, nodeReadNextString);
 }
 
-static int configReadToAvDictionary(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
-	return -1;
+static int configParseReadFloat(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	if (event->type != YAML_SCALAR_EVENT) {
+		fprintf(stderr, "%s expects scalar\n", __FUNCTION__);
+		return 0;
+	}
+
+	// Y U NO strntof
+	const size_t len = event->data.scalar.length;
+	char buffer[16];
+	char *value;
+	if (len < 16) {
+		memcpy(buffer, event->data.scalar.value, len);
+		buffer[len] = '\0';
+		value = buffer;
+	} else {
+		value = strndup((const char*)event->data.scalar.value, len);
+	}
+
+	char *endptr;
+	*((float*)(arg0 + arg1)) = strtof(value, &endptr);
+
+	int retval = 1;
+	if (endptr != value + len) {
+		fprintf(stderr, "error reading %s as float\n", value);
+		retval = 0;
+	}
+
+	if (len >= 16)
+		free(value);
+	return retval;
+}
+
+static int configSaveNextFloat(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	const ExpectedNode nodeReadNextString[] = {{.type = YAML_SCALAR_EVENT, .arg1 = arg1, .action = configParseReadFloat, .stop = 1}, {.type = -1}};
+	return yamlParse(parser, arg0, nodeReadNextString);
+}
+
+static const ExpectedNode expectMapping[] = {{.type = YAML_MAPPING_START_EVENT, .stop = 1}, {.type = -1}};
+static int configExpectMapping(yaml_parser_t *parser) {
+	return yamlParse(parser, 0, expectMapping);
+}
+
+static int configReadMappingToAvDictionary(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	char *key, *value;
+	ExpectedNode nodes[] = {
+		{.type = YAML_SCALAR_EVENT, .action = configParseReadString, .stop = 1},
+		{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+		{.type = -1},
+	};
+
+	if (0 >= configExpectMapping(parser)) {
+		fprintf(stderr, "%s expects mapping\n", __FUNCTION__);
+		return 0;
+	}
+
+	for (;;) {
+		key = NULL;
+		nodes[0].arg1 = (intptr_t)&key;
+		int result = yamlParse(parser, 0, nodes);
+		if (0 >= result) {
+			fprintf(stderr, "error reading key: %d", result);
+			return result;
+		}
+		if (!key) return 1;
+
+		value = NULL;
+		nodes[0].arg1 = (intptr_t)&value;
+		result = yamlParse(parser, 0, nodes);
+		if (0 >= result || !value) {
+			fprintf(stderr, "error reading value: %d", result);
+			return result;
+		}
+
+		result = av_dict_set((AVDictionary**)(arg0 + arg1), key, value, AV_DICT_DONT_STRDUP_KEY | AV_DICT_DONT_STRDUP_VAL);
+		if (0 > result) {
+			fprintf(stderr, "error updating avdict: %d", result);
+			return result;
+		}
+	}
 }
 
 typedef struct {
 	char *input_url;
 	char *live_format;
 	char *live_url;
+	AVDictionary *live_options;
+	char *detect_threshold;
+	char *detect_thumbnail;
+	char *detect_output;
 } ConfigCamera;
 
 static const ExpectedNode nodeCamera[] = {
@@ -271,14 +352,30 @@ static const ExpectedNode nodeCamera[] = {
 			{.type = YAML_MAPPING_START_EVENT, .nest = (ExpectedNode[]){
 					{.type = YAML_SCALAR_EVENT, .scalar = "format", .arg1 = offsetof(ConfigCamera, live_format), .action = configSaveNextValue},
 					{.type = YAML_SCALAR_EVENT, .scalar = "url", .arg1 = offsetof(ConfigCamera, live_url), .action = configSaveNextValue},
-					{.type = YAML_SCALAR_EVENT, .scalar = "format-options", .arg1 = offsetof(ConfigCamera, live_url), .action = configReadToAvDictionary},
+					{.type = YAML_SCALAR_EVENT, .scalar = "format-options", .arg1 = offsetof(ConfigCamera, live_options), .action = configReadMappingToAvDictionary},
 					{.type = YAML_MAPPING_END_EVENT, .stop = 1},
 					{.type = -1},
 				}, .stop = 1},
 			{.type = -1},
 		},
 	},
-	{.type = YAML_SCALAR_EVENT, .scalar = "basic-detect", },
+	{.type = YAML_SCALAR_EVENT, .scalar = "basic-detect", .nest = (ExpectedNode[]){
+			{.type = YAML_MAPPING_START_EVENT, .nest = (ExpectedNode[]){
+					/* {.type = YAML_SCALAR_EVENT, .scalar = "coeffs", .nest = (ExpectedNode[]){ */
+					/* 		{.type = YAML_SEQUENCE_START_EVENT, .action = configCameraReadDetectCoeffs}, */
+					/* 		{.type = -1}, */
+					/* 	}, */
+					/* }, */
+					{.type = YAML_SCALAR_EVENT, .scalar = "threshold", .arg1 = offsetof(ConfigCamera, detect_threshold), .action = configSaveNextFloat},
+					{.type = YAML_SCALAR_EVENT, .scalar = "thumbnail", .arg1 = offsetof(ConfigCamera, detect_thumbnail), .action = configSaveNextValue},
+					{.type = YAML_SCALAR_EVENT, .scalar = "output-url", .arg1 = offsetof(ConfigCamera, detect_output), .action = configSaveNextValue},
+					{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+					{.type = -1},
+				}, .stop = 1},
+			{.type = -1},
+		},
+
+	},
 	{.type = YAML_MAPPING_START_EVENT},
 	{.type = YAML_MAPPING_END_EVENT, .stop = 1},
 	{.type = -1},
@@ -294,6 +391,7 @@ static const ExpectedNode nodeTop[] = {
 	{.type = YAML_STREAM_START_EVENT},
 	{.type = YAML_DOCUMENT_START_EVENT},
 	{.type = YAML_DOCUMENT_END_EVENT, .stop = 1},
+	{.type = YAML_MAPPING_END_EVENT},
 	{.type = YAML_MAPPING_START_EVENT},
 	{.type = YAML_SCALAR_EVENT, .scalar = "cameras", .nest = (ExpectedNode[]){
 			{.type = YAML_MAPPING_START_EVENT, .nest = (ExpectedNode[]){
