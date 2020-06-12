@@ -1,30 +1,28 @@
 #pragma once
 
 typedef struct AVFrame AVFrame;
+typedef struct AVDictionary AVDictionary;
 
 //typedef void (*ZCameraKeyframeTestFunc)(void *user, int format, const AVFrame *frame);
 
 typedef struct {
-	//int sync; // this camera will be synchronous
-	const char *name_m3u8;
-	const char *source_url;
-	//ZCameraKeyframeTestFunc test_func;
-	//void *user;
-	struct {
-		const char *m3u8_path;
-		const char *hls_time;
-		const char *hls_list_size;
-		const char *hls_base_url;
-		const char *hls_segment_filename;
-	} hls;
+	char *name;
+	char *input_url;
+	char *live_format;
+	char *live_url;
+	AVDictionary *live_options;
+	float detect_threshold;
+	char *detect_thumbnail;
+	char *detect_output;
+	char *detect_logfile;
+} ConfigCamera;
+
+typedef struct {
+	// is expected to be static/outlive the camera
+	const ConfigCamera *config;
 } ZCameraParams;
 
 typedef struct ZCamera ZCamera;
 
 ZCamera *zCameraCreate(ZCameraParams);
-//int zCameraPollPacket(ZCamera*);
 void zCameraDestroy(ZCamera*);
-
-
-
-char *stringCopy(const char* src, int len);

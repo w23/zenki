@@ -13,6 +13,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -167,16 +168,6 @@ static int configReadMappingToAvDictionary(yaml_parser_t *parser, const yaml_eve
 	}
 }
 
-typedef struct {
-	char *input_url;
-	char *live_format;
-	char *live_url;
-	AVDictionary *live_options;
-	char *detect_threshold;
-	char *detect_thumbnail;
-	char *detect_output;
-} ConfigCamera;
-
 static const YagelNode nodeCamera[] = {
 	{.type = YAML_SCALAR_EVENT, .scalar = "input", .nest = (YagelNode[]){
 			{.type = YAML_MAPPING_START_EVENT, .nest = (YagelNode[]){
@@ -208,6 +199,7 @@ static const YagelNode nodeCamera[] = {
 					{.type = YAML_SCALAR_EVENT, .scalar = "threshold", .arg1 = offsetof(ConfigCamera, detect_threshold), .action = yagelSaveNextFloat},
 					{.type = YAML_SCALAR_EVENT, .scalar = "thumbnail", .arg1 = offsetof(ConfigCamera, detect_thumbnail), .action = yagelSaveNextString},
 					{.type = YAML_SCALAR_EVENT, .scalar = "output-url", .arg1 = offsetof(ConfigCamera, detect_output), .action = yagelSaveNextString},
+					{.type = YAML_SCALAR_EVENT, .scalar = "logfile", .arg1 = offsetof(ConfigCamera, detect_logfile), .action = yagelSaveNextString},
 					{.type = YAML_MAPPING_END_EVENT, .stop = 1},
 					{.type = -1},
 				}, .stop = 1},
@@ -220,10 +212,30 @@ static const YagelNode nodeCamera[] = {
 	{.type = -1},
 };
 
+#define MAX_CAMERAS 8
+static struct {
+	ConfigCamera cameras[MAX_CAMERAS];
+	int ncameras;
+} config;
+
 static int configParseCamera(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
 	fprintf(stderr, "Parsing camera %.*s\n", (int)event->data.scalar.length, event->data.scalar.value);
-	ConfigCamera cam = { 0 };
-	return yagelParse(parser, (intptr_t)&cam, nodeCamera);
+	if (config.ncameras == MAX_CAMERAS) {
+		fprintf(stderr, "Max number of cameras reached: %d\n", MAX_CAMERAS);
+		return 0;
+	}
+
+	ConfigCamera *cam = config.cameras + config.ncameras;
+	const int result = yagelParse(parser, (intptr_t)cam, nodeCamera);
+	if (result <= 0) {
+		fprintf(stderr, "Error reading camera\n");
+		memset(cam, 0, sizeof(*cam));
+		return 0;
+	}
+
+	cam->name = strndup((const char*)event->data.scalar.value, event->data.scalar.length);
+	config.ncameras++;
+	return 1;
 }
 
 static const YagelNode nodeTop[] = {
@@ -264,10 +276,31 @@ static void printUsage(const char *self) {
 		fprintf(stderr, "Usage: %s [-c config] [-v]... rtsp://cam1 [rtsp://cam2]...\n", self);
 }
 
+static struct {
+	int exit;
+	ZCamera *cams[MAX_CAMERAS];
+} g;
+
+static void signalHandlerExit(int sig) {
+	const static char message[] ="Signal received, exiting\n";
+	write(0, message, sizeof(message)-1);
+	g.exit = 1;
+}
+
+static void setupSignals() {
+	struct sigaction sa = {
+		.sa_handler = signalHandlerExit,
+		.sa_mask = 0,
+		.sa_flags = 0,
+		.sa_restorer = NULL,
+	};
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+}
+
 int main(int argc, char* argv[]) {
 	int log_level = AV_LOG_FATAL;
 	int opt;
-	const char *config = NULL;
 
 	while ((opt = getopt(argc, argv, "vc:")) != -1) {
 		switch(opt) {
@@ -286,37 +319,34 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	if (optind == argc) {
+	if (config.ncameras < 1) {
 		fprintf(stderr, "No camera URLs supplied\n");
 		printUsage(argv[0]);
 		return EXIT_FAILURE;
 	}
 
-#define MAX_CAMERAS 4
-	ZCamera *cams[MAX_CAMERAS];
-
-	int ncameras = (argc - optind) / 2;
-	if (ncameras > MAX_CAMERAS) {
-		fprintf(stderr, "%d urls camera URLs supplied, but only max %d will be used\n", ncameras, MAX_CAMERAS);
-		ncameras = MAX_CAMERAS;
-	}
-
+	setupSignals();
 	avInit(log_level);
 
-	for (int i = 0; i < ncameras; ++i) {
-		const char *hls = argv[optind + i*2];
-		const char *url = argv[optind + i*2 + 1];
+	for (int i = 0; i < config.ncameras; ++i) {
+		const ConfigCamera *ccam = config.cameras + i;
 		const ZCameraParams params = {
-			.name_m3u8 = hls,
-			.source_url = url,
+			ccam,
 		};
-		cams[i] = zCameraCreate(params);
-		if (!cams[i]) {
-			fprintf(stderr, "Failed to create source '%s'\n", config);
+		g.cams[i] = zCameraCreate(params);
+		if (!g.cams[i]) {
+			fprintf(stderr, "Failed to create source '%s'\n", ccam->name);
 		}
 	}
 
-	for(;;) { sleep(1); }
+	while (!g.exit) { sleep(1); }
+
+	for (int i = 0; i < config.ncameras; ++i) {
+		if (!g.cams[i])
+			continue;
+		fprintf(stderr, "Stopping camera %s\n", config.cameras[i].name);
+		zCameraDestroy(g.cams[i]);
+	}
 
 	return 0;
 }

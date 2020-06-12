@@ -37,19 +37,19 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 			return 0;
 		}
 
-		switch (event.type) {
-			case YAML_NO_EVENT: fprintf(stderr, "YAML_NO_EVENT\n"); break;
-			case YAML_STREAM_START_EVENT: fprintf(stderr, "YAML_STREAM_START_EVENT\n"); break;
-			case YAML_STREAM_END_EVENT: fprintf(stderr, "YAML_STREAM_END_EVENT\n"); break;
-			case YAML_DOCUMENT_START_EVENT: fprintf(stderr, "YAML_DOCUMENT_START_EVENT\n"); break;
-			case YAML_DOCUMENT_END_EVENT: fprintf(stderr, "YAML_DOCUMENT_END_EVENT\n"); break;
-			case YAML_ALIAS_EVENT: fprintf(stderr, "YAML_ALIAS_EVENT\n"); break;
-			case YAML_SCALAR_EVENT: fprintf(stderr, "YAML_SCALAR_EVENT: %.*s\n", (int)event.data.scalar.length, event.data.scalar.value); break;
-			case YAML_SEQUENCE_START_EVENT: fprintf(stderr, "YAML_SEQUENCE_START_EVENT\n"); break;
-			case YAML_SEQUENCE_END_EVENT: fprintf(stderr, "YAML_SEQUENCE_END_EVENT\n"); break;
-			case YAML_MAPPING_START_EVENT: fprintf(stderr, "YAML_MAPPING_START_EVENT\n"); break;
-			case YAML_MAPPING_END_EVENT: fprintf(stderr, "YAML_MAPPING_END_EVENT\n"); break;
-		}
+		// switch (event.type) {
+		// 	case YAML_NO_EVENT: fprintf(stderr, "YAML_NO_EVENT\n"); break;
+		// 	case YAML_STREAM_START_EVENT: fprintf(stderr, "YAML_STREAM_START_EVENT\n"); break;
+		// 	case YAML_STREAM_END_EVENT: fprintf(stderr, "YAML_STREAM_END_EVENT\n"); break;
+		// 	case YAML_DOCUMENT_START_EVENT: fprintf(stderr, "YAML_DOCUMENT_START_EVENT\n"); break;
+		// 	case YAML_DOCUMENT_END_EVENT: fprintf(stderr, "YAML_DOCUMENT_END_EVENT\n"); break;
+		// 	case YAML_ALIAS_EVENT: fprintf(stderr, "YAML_ALIAS_EVENT\n"); break;
+		// 	case YAML_SCALAR_EVENT: fprintf(stderr, "YAML_SCALAR_EVENT: %.*s\n", (int)event.data.scalar.length, event.data.scalar.value); break;
+		// 	case YAML_SEQUENCE_START_EVENT: fprintf(stderr, "YAML_SEQUENCE_START_EVENT\n"); break;
+		// 	case YAML_SEQUENCE_END_EVENT: fprintf(stderr, "YAML_SEQUENCE_END_EVENT\n"); break;
+		// 	case YAML_MAPPING_START_EVENT: fprintf(stderr, "YAML_MAPPING_START_EVENT\n"); break;
+		// 	case YAML_MAPPING_END_EVENT: fprintf(stderr, "YAML_MAPPING_END_EVENT\n"); break;
+		// }
 
 		int processed = 0;
 		if (event.type == YAML_NO_EVENT) {

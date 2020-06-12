@@ -12,17 +12,23 @@
 #include <unistd.h>
 
 #define MAX_STREAMS 4
+#define MAX_SEGMENT_PACKETS 512
+
+typedef struct {
+	AVPacket *packet;
+	AVFrame *frame;
+} Packet;
 
 struct ZCamera {
-	const char *name_m3u8;
+	const ConfigCamera *config;
 	//void *user_ptr;
 	pthread_t thread;
+	int close;
 
 	/* ZCameraKeyframeTestFunc test_func; */
 	/* void *user; */
 
 	struct {
-		char *url;
 		AVFormatContext *fctx;
 	} in;
 
@@ -36,24 +42,31 @@ struct ZCamera {
 		int skipped_frames;
 		AVFrame *prev;
 	} decode;
+
+	struct {
+		FILE *log;
+		int active;
+		Packet queue[256];
+		int cursor_read, cursor_write;
+	} detect;
 };
 
 
 static int openCamera(ZCamera *cam) {
 	// TODO: stimeout for rtsp
-	int averror = avformat_open_input(&cam->in.fctx, cam->in.url, NULL, NULL);
+	int averror = avformat_open_input(&cam->in.fctx, cam->config->input_url, NULL, NULL);
 	if (0 != averror) {
-		fprintf(stderr, "Cannot open input \"%s\": %s\n", cam->in.url, av_err2str(averror));
+		fprintf(stderr, "Cannot open input \"%s\": %s\n", cam->config->input_url, av_err2str(averror));
 		goto error;
 	}
 
 	averror = avformat_find_stream_info(cam->in.fctx, NULL);
 	if (0 > averror) {
-		fprintf(stderr, "Cannot find streams in \"%s\": %s\n", cam->in.url, av_err2str(averror));
+		fprintf(stderr, "Cannot find streams in \"%s\": %s\n", cam->config->input_url, av_err2str(averror));
 		goto error_close;
 	}
 
-	av_dump_format(cam->in.fctx, 0, cam->in.url, 0);
+	av_dump_format(cam->in.fctx, 0, cam->config->input_url, 0);
 
 	// TODO rtsp errors 5xx on this av_read_play(cam->in.fctx);
 	return 0;
@@ -67,9 +80,9 @@ error:
 }
 
 static int openHls(ZCamera *cam) {
-	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", cam->name_m3u8);
+	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", cam->config->live_url);
 	if (0 != averror) {
-		fprintf(stderr, "Cannot open HLS output: %s\n", cam->in.url, av_err2str(averror));
+		fprintf(stderr, "Cannot open HLS output: %s\n", cam->config->input_url, av_err2str(averror));
 		goto error;
 	}
 
@@ -102,15 +115,7 @@ static int openHls(ZCamera *cam) {
 		}
 	}
 
-	AVDictionary *options = NULL;
-	av_dict_set(&options, "hls_flags", "delete_segments+append_list", 0);
-	av_dict_set(&options, "hls_time", "5", 0);
-	av_dict_set(&options, "hls_list_size", "5", 0);
-	av_dict_set(&options, "hls_base_url", "segments/", 0);
-	av_dict_set(&options, "hls_segment_filename", "segments/fixme-%d.ts", 0);
-
-	averror = avformat_write_header(cam->hls.fctx, &options);
-	av_dict_free(&options);
+	averror = avformat_write_header(cam->hls.fctx, (AVDictionary**)&cam->config->live_options);
 	if (averror < 0) {
 			fprintf(stderr, "ERROR: cannot write header for HLS output: %s\n", av_err2str(averror));
 			goto error_close;
@@ -162,24 +167,32 @@ static uint64_t byteDifference(const uint8_t *a, const uint8_t *b, int width, in
 	return value;
 }
 
-static float frameCompare(const AVFrame *a, const AVFrame *b) {
+typedef struct {
+	float u, y, v;
+} Yuv;
+
+static int frameCompare(const AVFrame *a, const AVFrame *b, Yuv *retval) {
 	if (!a || !b) return -1;
 	if (a->format != b->format) return -2;
 	if (a->width != b->width || a->height != b->height) return -3;
 	if (a->format != AV_PIX_FMT_YUV420P && a->format != AV_PIX_FMT_YUVJ420P) return -4;
-	const float ky = 1.f, ku = 1.f, kv = 1.f;
-	const float
-		ry = byteDifference(a->data[0], b->data[0], a->width, a->height, a->linesize[0]) * ky,
-		ru = byteDifference(a->data[1], b->data[1], a->width/2, a->height/2, a->linesize[1]) * ku,
-		rv = byteDifference(a->data[2], b->data[2], a->width/2, a->height/2, a->linesize[2]) * kv;
-	fprintf(stderr, "delta Y=%f U=%f V=%f sum=%f\n", ry, ru, rv, ry + ru + rv);
-	return ry + ru + rv;
+	if (a->linesize[0] != b->linesize[0]) return -5;
+	if (a->linesize[1] != b->linesize[1]) return -6;
+	if (a->linesize[2] != b->linesize[2]) return -7;
+	const float scale = a->width * a->height / 100.f;
+	retval->y = byteDifference(a->data[0], b->data[0], a->width, a->height, a->linesize[0]) / scale;
+	retval->u = byteDifference(a->data[1], b->data[1], a->width/2, a->height/2, a->linesize[1]) * 4 / scale;
+	retval->v = byteDifference(a->data[2], b->data[2], a->width/2, a->height/2, a->linesize[2]) * 4 / scale;
+	return 1;
 }
 
 static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 	const AVStream *stream = cam->in.fctx->streams[pkt->stream_index];
 	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
-	if (!is_video || ((pkt->flags & AV_PKT_FLAG_KEY) == 0)) {
+	const int is_keyframe = !!(pkt->flags & AV_PKT_FLAG_KEY);
+
+	if (!is_video || !is_keyframe) {
+		//cam->detect.segment
 		++cam->decode.skipped_frames;
 		return;
 	}
@@ -195,7 +208,7 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 		}
 	}
 
-	printf("P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
+	fprintf(stderr, "P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
 		(long long)pkt->pts, (long long)pkt->dts,
 		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, cam->decode.skipped_frames);
 	cam->decode.skipped_frames = 0;
@@ -214,11 +227,24 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 			return;
 		}
 
-		const float comparison = frameCompare(cam->decode.prev, frame);
-		fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d delta=%f]\n", cam->decode.ctx->frame_number, frame->pict_type, av_get_pix_fmt_name(frame->format), frame->width, frame->height, comparison);
+		Yuv diff = { 0 };
+		const int comperr = frameCompare(cam->decode.prev, frame, &diff);
+		int detected = 0;
+		if (0 >= comperr) {
+			fprintf(stderr, "Error comparing frames: %d\n", comperr);
+			detected = 1;
+		} else {
+			const float difference = diff.y + diff.u + diff.v;
+			detected = difference > cam->config->detect_threshold;
+			fprintf(stderr, "F[%d, type=%d, format=%s, %dx%d delta=%f detected=%d]\n",
+					cam->decode.ctx->frame_number, frame->pict_type, av_get_pix_fmt_name(frame->format), frame->width, frame->height, difference, detected);
+			if (cam->detect.log) {
+				fprintf(cam->detect.log, "%f %f %f %f %d\n", diff.y, diff.u, diff.v, difference, detected);
+				fflush(cam->detect.log);
+			}
+		}
 
-		/* if (cam->test_func) */
-		/* 	cam->test_func(cam->user, frame->format, frame); */
+		// TODO write segment if detected
 
 		av_frame_unref(cam->decode.prev);
 		av_frame_free(&cam->decode.prev);
@@ -237,6 +263,7 @@ static int readPacket(ZCamera *cam) {
 	const int result = av_read_frame(cam->in.fctx, &pkt);
 	if (result != 0) {
 		fprintf(stderr, "Error reading frame: %d", result);
+		// FIXME what to do here?
 		return result;
 	}
 
@@ -274,60 +301,64 @@ static void *zCameraThreadFunc(void *param) {
 
 	for (;;) {
 		if (0 == openCamera(cam)) {
-			while (0 == readPacket(cam)) {}
+			while (!cam->close && 0 == readPacket(cam)) {}
 		}
 
-		// FIXME exit condition
+		if (cam->close)
+			break;
 
 		fprintf(stderr, "Retrying camera %p in 1 sec\n", cam);
 		sleep(1);
 	}
 
-	// FIXME deinit strings
-	return NULL;
-}
+	fprintf(stderr, "Closing camera %s\n", cam->config->name);
 
-char *stringCopy(const char* src, int len) {
-	const int length = len >= 0 ? len : strlen(src);
-	char *str = malloc(length + 1);
-	strncpy(str, src, length);
-	str[length] = '\0';
-	return str;
+	// TODO close detect queue
+	av_frame_free(&cam->decode.prev);
+	avcodec_close(cam->decode.ctx);
+	avformat_free_context(cam->hls.fctx);
+	avformat_close_input(&cam->in.fctx);
+	if (cam->detect.log)
+		fclose(cam->detect.log);
+
+	return NULL;
 }
 
 ZCamera *zCameraCreate(ZCameraParams params) {
+	FILE *detect_log = NULL;
+	if (params.config->detect_logfile) {
+		detect_log = fopen(params.config->detect_logfile, "a");
+		if (!detect_log) {
+			fprintf(stderr, "Cannot open log file '%s': %s\n", params.config->detect_logfile, strerror(errno));
+			return NULL;
+		}
+	}
+
 	ZCamera *cam = malloc(sizeof(*cam));
 	memset(cam, 0, sizeof(*cam));
+	cam->config = params.config;
+	cam->detect.log = detect_log;
 
-	cam->name_m3u8 = stringCopy(params.name_m3u8, -1);
-	cam->in.url = stringCopy(params.source_url, -1);
-	/* cam->test_func = params.test_func; */
-	/* cam->user = params.user; */
-
-	/* const int sync = 1; */
-	/* if (sync) { */
-	/* 	if (0 != openCamera(cam)) { */
-	/* 		zCameraDestroy(cam); */
-	/* 		return NULL; */
-	/* 	} */
-	/* } else { */
-		if (0 != pthread_create(&cam->thread, NULL, zCameraThreadFunc, cam)) {
-			printf("ERROR: Cannot create camera thread\n");
-			goto error;
-		}
-	//}
+	if (0 != pthread_create(&cam->thread, NULL, zCameraThreadFunc, cam)) {
+		printf("ERROR: Cannot create camera thread\n");
+		free(cam);
+		return NULL;
+	}
 
 	return cam;
-
-error:
-	free(cam);
-	return NULL;
-}
-
-int zCameraPollPacket(ZCamera *cam) {
-	return readPacket(cam);
 }
 
 void zCameraDestroy(ZCamera *cam) {
-	// FIXME
+	if (!cam)
+		return;
+
+	cam->close = 1;
+
+	void *retval = NULL;
+	const int result = pthread_join(cam->thread, &retval);
+	if (result != 0) {
+		fprintf(stderr, "Error joining camera '%s' thread: %s\n", cam->config->name, strerror(result));
+	}
+
+	memset(cam, 0, sizeof(*cam));
 }
