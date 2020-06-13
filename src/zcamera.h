@@ -6,11 +6,16 @@ typedef struct AVDictionary AVDictionary;
 //typedef void (*ZCameraKeyframeTestFunc)(void *user, int format, const AVFrame *frame);
 
 typedef struct {
+	char *url;
+	char *format;
+	AVDictionary *options;
+} ConfigOutput;
+
+typedef struct {
 	char *name;
 	char *input_url;
-	char *live_format;
-	char *live_url;
-	AVDictionary *live_options;
+	ConfigOutput output_live;
+	ConfigOutput output_motion;
 	float detect_threshold;
 	char *detect_thumbnail;
 	char *detect_output;

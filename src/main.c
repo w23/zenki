@@ -147,7 +147,7 @@ static int configReadMappingToAvDictionary(yaml_parser_t *parser, const yaml_eve
 		nodes[0].arg1 = (intptr_t)&key;
 		int result = yagelParse(parser, 0, nodes);
 		if (0 >= result) {
-			fprintf(stderr, "error reading key: %d", result);
+			fprintf(stderr, "error reading key: %d\n", result);
 			return result;
 		}
 		if (!key) return 1;
@@ -156,16 +156,32 @@ static int configReadMappingToAvDictionary(yaml_parser_t *parser, const yaml_eve
 		nodes[0].arg1 = (intptr_t)&value;
 		result = yagelParse(parser, 0, nodes);
 		if (0 >= result || !value) {
-			fprintf(stderr, "error reading value: %d", result);
+			fprintf(stderr, "error reading value: %d\n", result);
 			return result;
 		}
 
 		result = av_dict_set((AVDictionary**)(arg0 + arg1), key, value, AV_DICT_DONT_STRDUP_KEY | AV_DICT_DONT_STRDUP_VAL);
 		if (0 > result) {
-			fprintf(stderr, "error updating avdict: %d", result);
+			fprintf(stderr, "error updating avdict: %d\n", result);
 			return result;
 		}
 	}
+}
+
+static const YagelNode nodeOutput[] = {
+	{.type = YAML_MAPPING_START_EVENT, .nest = (YagelNode[]){
+		{.type = YAML_SCALAR_EVENT, .scalar = "format", .arg1 = offsetof(ConfigOutput, format), .action = yagelSaveNextString},
+		{.type = YAML_SCALAR_EVENT, .scalar = "url", .arg1 = offsetof(ConfigOutput, url), .action = yagelSaveNextString},
+		{.type = YAML_SCALAR_EVENT, .scalar = "options", .arg1 = offsetof(ConfigOutput, options), .action = configReadMappingToAvDictionary},
+		{.type = YAML_MAPPING_END_EVENT, .stop = 1},
+		{.type = -1},
+	}, .stop = 1},
+	{.type = -1},
+};
+
+static int configReadOutput(yaml_parser_t *parser, const yaml_event_t *event, intptr_t arg0, intptr_t arg1) {
+	const int e = yagelParse(parser, arg0 + arg1, nodeOutput);
+	return e;
 }
 
 static const YagelNode nodeCamera[] = {
@@ -178,17 +194,8 @@ static const YagelNode nodeCamera[] = {
 			{.type = -1},
 		},
 	},
-	{.type = YAML_SCALAR_EVENT, .scalar = "output-live", .nest = (YagelNode[]){
-			{.type = YAML_MAPPING_START_EVENT, .nest = (YagelNode[]){
-					{.type = YAML_SCALAR_EVENT, .scalar = "format", .arg1 = offsetof(ConfigCamera, live_format), .action = yagelSaveNextString},
-					{.type = YAML_SCALAR_EVENT, .scalar = "url", .arg1 = offsetof(ConfigCamera, live_url), .action = yagelSaveNextString},
-					{.type = YAML_SCALAR_EVENT, .scalar = "format-options", .arg1 = offsetof(ConfigCamera, live_options), .action = configReadMappingToAvDictionary},
-					{.type = YAML_MAPPING_END_EVENT, .stop = 1},
-					{.type = -1},
-				}, .stop = 1},
-			{.type = -1},
-		},
-	},
+	{.type = YAML_SCALAR_EVENT, .scalar = "output-live", .arg1 = offsetof(ConfigCamera, output_live), .action=configReadOutput},
+	{.type = YAML_SCALAR_EVENT, .scalar = "output-motion", .arg1 = offsetof(ConfigCamera, output_motion), .action=configReadOutput},
 	{.type = YAML_SCALAR_EVENT, .scalar = "basic-detect", .nest = (YagelNode[]){
 			{.type = YAML_MAPPING_START_EVENT, .nest = (YagelNode[]){
 					/* {.type = YAML_SCALAR_EVENT, .scalar = "coeffs", .nest = (YagelNode[]){ */
@@ -301,8 +308,9 @@ static void setupSignals() {
 int main(int argc, char* argv[]) {
 	int log_level = AV_LOG_FATAL;
 	int opt;
+	int test_only = 0;
 
-	while ((opt = getopt(argc, argv, "vc:")) != -1) {
+	while ((opt = getopt(argc, argv, "tvc:")) != -1) {
 		switch(opt) {
 			case 'c':
 				if (!readConfig(optarg)) {
@@ -312,6 +320,9 @@ int main(int argc, char* argv[]) {
 				break;
 			case 'v':
 				log_level += 8; // AV_LOG_ levels are 8 apart
+				break;
+			case 't':
+				test_only = 1;
 				break;
 			default: // '?'
 				printUsage(argv[0]);
@@ -324,6 +335,9 @@ int main(int argc, char* argv[]) {
 		printUsage(argv[0]);
 		return EXIT_FAILURE;
 	}
+
+	if (test_only)
+		return 0;
 
 	setupSignals();
 	avInit(log_level);

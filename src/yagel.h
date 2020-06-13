@@ -22,6 +22,39 @@ int yagelSaveNextString(yaml_parser_t *parser, const yaml_event_t *event, intptr
 
 #if defined(YAGEL_IMPLEMENT)
 
+static void yagelPrintEvent(const yaml_event_t* event) {
+	switch (event->type) {
+		case YAML_NO_EVENT: fprintf(stderr, "YAML_NO_EVENT\n"); break;
+		case YAML_STREAM_START_EVENT: fprintf(stderr, "YAML_STREAM_START_EVENT\n"); break;
+		case YAML_STREAM_END_EVENT: fprintf(stderr, "YAML_STREAM_END_EVENT\n"); break;
+		case YAML_DOCUMENT_START_EVENT: fprintf(stderr, "YAML_DOCUMENT_START_EVENT\n"); break;
+		case YAML_DOCUMENT_END_EVENT: fprintf(stderr, "YAML_DOCUMENT_END_EVENT\n"); break;
+		case YAML_ALIAS_EVENT: fprintf(stderr, "YAML_ALIAS_EVENT\n"); break;
+		case YAML_SCALAR_EVENT: fprintf(stderr, "YAML_SCALAR_EVENT: %.*s\n", (int)event->data.scalar.length, event->data.scalar.value); break;
+		case YAML_SEQUENCE_START_EVENT: fprintf(stderr, "YAML_SEQUENCE_START_EVENT\n"); break;
+		case YAML_SEQUENCE_END_EVENT: fprintf(stderr, "YAML_SEQUENCE_END_EVENT\n"); break;
+		case YAML_MAPPING_START_EVENT: fprintf(stderr, "YAML_MAPPING_START_EVENT\n"); break;
+		case YAML_MAPPING_END_EVENT: fprintf(stderr, "YAML_MAPPING_END_EVENT\n"); break;
+	}
+}
+
+static const char* yagelEventName(int type) {
+	switch (type) {
+		case YAML_NO_EVENT: return "YAML_NO_EVENT";
+		case YAML_STREAM_START_EVENT: return "YAML_STREAM_START_EVENT";
+		case YAML_STREAM_END_EVENT: return "YAML_STREAM_END_EVENT";
+		case YAML_DOCUMENT_START_EVENT: return "YAML_DOCUMENT_START_EVENT";
+		case YAML_DOCUMENT_END_EVENT: return "YAML_DOCUMENT_END_EVENT";
+		case YAML_ALIAS_EVENT: return "YAML_ALIAS_EVENT";
+		case YAML_SCALAR_EVENT: return "YAML_SCALAR_EVENT";
+		case YAML_SEQUENCE_START_EVENT: return "YAML_SEQUENCE_START_EVENT";
+		case YAML_SEQUENCE_END_EVENT: return "YAML_SEQUENCE_END_EVENT";
+		case YAML_MAPPING_START_EVENT: return "YAML_MAPPING_START_EVENT";
+		case YAML_MAPPING_END_EVENT: return "YAML_MAPPING_END_EVENT";
+		default: return "Unknown";
+	}
+}
+
 // returns > 0 on success
 int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 #define MAX_EXPECTED_NODES_STACK_DEPTH 8
@@ -37,19 +70,7 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 			return 0;
 		}
 
-		// switch (event.type) {
-		// 	case YAML_NO_EVENT: fprintf(stderr, "YAML_NO_EVENT\n"); break;
-		// 	case YAML_STREAM_START_EVENT: fprintf(stderr, "YAML_STREAM_START_EVENT\n"); break;
-		// 	case YAML_STREAM_END_EVENT: fprintf(stderr, "YAML_STREAM_END_EVENT\n"); break;
-		// 	case YAML_DOCUMENT_START_EVENT: fprintf(stderr, "YAML_DOCUMENT_START_EVENT\n"); break;
-		// 	case YAML_DOCUMENT_END_EVENT: fprintf(stderr, "YAML_DOCUMENT_END_EVENT\n"); break;
-		// 	case YAML_ALIAS_EVENT: fprintf(stderr, "YAML_ALIAS_EVENT\n"); break;
-		// 	case YAML_SCALAR_EVENT: fprintf(stderr, "YAML_SCALAR_EVENT: %.*s\n", (int)event.data.scalar.length, event.data.scalar.value); break;
-		// 	case YAML_SEQUENCE_START_EVENT: fprintf(stderr, "YAML_SEQUENCE_START_EVENT\n"); break;
-		// 	case YAML_SEQUENCE_END_EVENT: fprintf(stderr, "YAML_SEQUENCE_END_EVENT\n"); break;
-		// 	case YAML_MAPPING_START_EVENT: fprintf(stderr, "YAML_MAPPING_START_EVENT\n"); break;
-		// 	case YAML_MAPPING_END_EVENT: fprintf(stderr, "YAML_MAPPING_END_EVENT\n"); break;
-		// }
+		//yagelPrintEvent(&event);
 
 		int processed = 0;
 		if (event.type == YAML_NO_EVENT) {
@@ -58,7 +79,6 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 			const YagelNode *nodes = stack[stack_pos];
 			for (int i = 0; nodes[i].type != -1; ++i) {
 				const YagelNode *node = nodes + i;
-				//printf("%d %d E%d\n", i, nodes_num, node->type);
 				if (node->type != event.type)
 					continue;
 
@@ -72,14 +92,6 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 					return 0;
 				}
 
-				if (node->stop) {
-					if (stack_pos == 0) {
-						stop = 1;
-					} else {
-						--stack_pos;
-					}
-				}
-
 				if (node->nest) {
 					++stack_pos;
 					if (stack_pos == MAX_EXPECTED_NODES_STACK_DEPTH) {
@@ -88,6 +100,16 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 						return 0;
 					}
 					stack[stack_pos] = node->nest;
+				} else {
+					while(node->stop) {
+						if (stack_pos == 0) {
+							stop = 1;
+							break;
+						} else {
+							--stack_pos;
+							node = stack[stack_pos];
+						}
+					}
 				}
 
 				processed = 1;
@@ -98,7 +120,7 @@ int yagelParse(yaml_parser_t *parser, intptr_t arg0, const YagelNode *nodes) {
 		const int event_type = event.type;
 		yaml_event_delete(&event);
 		if (!processed) {
-			fprintf(stderr, "Error: yaml event %d unhandled\n", event_type);
+			fprintf(stderr, "Error: yaml event %s (%d) unhandled\n", yagelEventName(event_type), event_type);
 			return 0;
 		}
 	}

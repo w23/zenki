@@ -5,12 +5,12 @@ cameras:
     output-live:
       format: hls
       url: front.m3u8
-      format-options:
+      options:
         hls_flags: delete_segments+append_list
         hls_time: 5
         hls_list_size: 5
         hls_base_url: segments/
-        hls_segment_filename: segments/fixme-%d.ts
+        hls_segment_filename: segments/front-%d.ts
     basic-detect:
       # coeffs: [1, 1, 1] # Y U V
       threshold: 10 # pixel count normalized

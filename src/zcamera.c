@@ -19,6 +19,11 @@ typedef struct {
 	AVFrame *frame;
 } Packet;
 
+typedef struct {
+	AVFormatContext *fctx;
+	int stream_mapping[MAX_STREAMS];
+} Output;
+
 struct ZCamera {
 	const ConfigCamera *config;
 	//void *user_ptr;
@@ -32,10 +37,8 @@ struct ZCamera {
 		AVFormatContext *fctx;
 	} in;
 
-	struct {
-		AVFormatContext *fctx;
-		int stream_mapping[MAX_STREAMS];
-	} hls;
+	Output live;
+	Output motion;
 
 	struct {
 		AVCodecContext *ctx;
@@ -79,57 +82,91 @@ error:
 	return averror;
 }
 
-static int openHls(ZCamera *cam) {
-	int averror = avformat_alloc_output_context2(&cam->hls.fctx, NULL, "hls", cam->config->live_url);
+static int outputOpen(Output *out, const ConfigOutput *config, const AVFormatContext *inctx) {
+	// TODO strftime url
+	const char *url = config->url;
+
+	int averror = avformat_alloc_output_context2(&out->fctx, NULL, config->format, url);
 	if (0 != averror) {
-		fprintf(stderr, "Cannot open HLS output: %s\n", cam->config->input_url, av_err2str(averror));
+		fprintf(stderr, "Cannot output URL: %s\n", url, av_err2str(averror));
 		goto error;
 	}
 
 	for (int i = 0; i < MAX_STREAMS; ++i)
-		cam->hls.stream_mapping[i] = -1;
+		out->stream_mapping[i] = -1;
 
 	int mapped_index = 0;
-	for (int i = 0; i < cam->in.fctx->nb_streams; ++i) {
+	for (int i = 0; i < inctx->nb_streams; ++i) {
 		if (i >= MAX_STREAMS) {
-			fprintf(stderr, "WARNING: too many streams, stream %d for HLS output will be ignored\n", i);
+			fprintf(stderr, "WARNING: too many streams, stream %d for output will be ignored\n", i);
 			continue;
 		}
 
-		const AVCodecParameters *codecpar = cam->in.fctx->streams[i]->codecpar;
+		const AVCodecParameters *codecpar = inctx->streams[i]->codecpar;
 		if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO && codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
 			continue;
 
-		cam->hls.stream_mapping[i] = mapped_index++;
+		out->stream_mapping[i] = mapped_index++;
 
-		AVStream *stream = avformat_new_stream(cam->hls.fctx, NULL);
+		AVStream *stream = avformat_new_stream(out->fctx, NULL);
 		if (!stream) {
-			fprintf(stderr, "ERROR: cannot create new stream for stream %d for HLS output: %s\n", i, av_err2str(averror));
+			fprintf(stderr, "ERROR: cannot create new stream for stream %d for output: %s\n", i, av_err2str(averror));
 			goto error_close;
 		}
 
 		averror = avcodec_parameters_copy(stream->codecpar, codecpar);
 		if (averror < 0) {
-			fprintf(stderr, "ERROR: cannot copy codec parameters for stream %d for HLS output: %s\n", i, av_err2str(averror));
+			fprintf(stderr, "ERROR: cannot copy codec parameters for stream %d for output: %s\n", i, av_err2str(averror));
 			goto error_close;
 		}
 	}
 
-	averror = avformat_write_header(cam->hls.fctx, (AVDictionary**)&cam->config->live_options);
+	averror = avformat_write_header(out->fctx, (AVDictionary**)&config->options);
 	if (averror < 0) {
-			fprintf(stderr, "ERROR: cannot write header for HLS output: %s\n", av_err2str(averror));
+			fprintf(stderr, "ERROR: cannot write header for output: %s\n", av_err2str(averror));
 			goto error_close;
 	}
 
-	av_dump_format(cam->hls.fctx, 0, "fixme.m3u8", 1);
+	av_dump_format(out->fctx, 0, url, 1);
 	return 0;
 
 error_close:
-	avformat_free_context(cam->hls.fctx);
-	cam->hls.fctx = NULL;
+	avformat_free_context(out->fctx);
+	out->fctx = NULL;
 
 error:
+	// TODO free formatted url
 	return averror;
+}
+
+static int outputWrite(Output *out, const AVFormatContext *inctx, AVPacket *pkt) {
+	if (!out->fctx)
+		return 0;
+
+	if (pkt->stream_index >= MAX_STREAMS || out->stream_mapping[pkt->stream_index] < 0) {
+		// skip packet
+		return 1;
+	}
+
+	AVStream *in_stream = inctx->streams[pkt->stream_index];
+	pkt->stream_index = out->stream_mapping[pkt->stream_index];
+	AVStream *out_stream = out->fctx->streams[pkt->stream_index];
+
+	pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+	pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+	pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+	//pkt.pos = -1;
+
+	int averror = av_interleaved_write_frame(out->fctx, pkt);
+	if (averror < 0) {
+			fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
+			// FIXME handle error
+	}
+	return averror;
+}
+
+static void outputClose(Output *out) {
+	avformat_free_context(out->fctx);
 }
 
 static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
@@ -152,7 +189,7 @@ static enum AVPixelFormat camNegotiateDecodePixelFormat(struct AVCodecContext *s
 	}
 	if (selected == -1) selected = 0;
 	fprintf(stderr, "Selected: %d %s\n", fmt[selected], av_get_pix_fmt_name(fmt[selected]));
-	return fmt[selected];
+	 return fmt[selected];
 }
 
 static uint64_t byteDifference(const uint8_t *a, const uint8_t *b, int width, int height, int stride) {
@@ -269,27 +306,14 @@ static int readPacket(ZCamera *cam) {
 
 	analyzePacket(cam, &pkt);
 
-	if (!cam->hls.fctx) {
-		openHls(cam);
+	if (!cam->live.fctx) {
+		// FIXME error check
+		outputOpen(&cam->live, &cam->config->output_live, cam->in.fctx);
 	}
 
-	if (cam->hls.fctx && pkt.stream_index < MAX_STREAMS && cam->hls.stream_mapping[pkt.stream_index] >= 0) {
-		AVStream *in_stream = cam->in.fctx->streams[pkt.stream_index];
-		pkt.stream_index = cam->hls.stream_mapping[pkt.stream_index];
-		AVStream *out_stream = cam->hls.fctx->streams[pkt.stream_index];
-
-		pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-		pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-		pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
-		//pkt.pos = -1;
-
-		//packetCallback(&pkt, cam->in.fctx->streams[pkt.stream_index]);
-		//log_packet(cam->hls.fctx, &pkt, "out");
-		int averror = av_interleaved_write_frame(cam->hls.fctx, &pkt);
-		if (averror < 0) {
-				fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
-				// FIXME handle error
-		}
+	if (cam->live.fctx) {
+		// FIXME error check
+		outputWrite(&cam->live, cam->in.fctx, &pkt);
 	}
 
 	av_packet_unref(&pkt);
@@ -316,7 +340,7 @@ static void *zCameraThreadFunc(void *param) {
 	// TODO close detect queue
 	av_frame_free(&cam->decode.prev);
 	avcodec_close(cam->decode.ctx);
-	avformat_free_context(cam->hls.fctx);
+	outputClose(&cam->live);
 	avformat_close_input(&cam->in.fctx);
 	if (cam->detect.log)
 		fclose(cam->detect.log);
