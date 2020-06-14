@@ -95,7 +95,6 @@ static const YagelNode nodeCamera[] = {
 					/* }, */
 					{.type = YAML_SCALAR_EVENT, .scalar = "threshold", .arg1 = offsetof(ConfigCamera, detect_threshold), .action = yagelSaveNextFloat},
 					{.type = YAML_SCALAR_EVENT, .scalar = "thumbnail", .arg1 = offsetof(ConfigCamera, detect_thumbnail), .action = yagelSaveNextString},
-					{.type = YAML_SCALAR_EVENT, .scalar = "output-url", .arg1 = offsetof(ConfigCamera, detect_output), .action = yagelSaveNextString},
 					{.type = YAML_SCALAR_EVENT, .scalar = "logfile", .arg1 = offsetof(ConfigCamera, detect_logfile), .action = yagelSaveNextString},
 					{.type = YAML_MAPPING_END_EVENT, .stop = 1},
 					{.type = -1},

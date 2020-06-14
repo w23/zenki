@@ -11,8 +11,11 @@ cameras:
         hls_list_size: 5
         hls_base_url: segments/
         hls_segment_filename: segments/front-%d.ts
+    output-motion:
+      url: front/event-%Y-%m-%d-%H-%M-%S.mkv # strftime, no transcode
     basic-detect:
       # coeffs: [1, 1, 1] # Y U V
-      threshold: 10 # pixel count normalized
+      threshold: 600 # pixel count normalized
       thumbnail: front/event-%Y-%m-%d-%H-%M-%S.jpg # strftime
-      output-url: front/event-%Y-%m-%d-%H-%M-%S.mkv # strftime, no transcode
+      logfile: front.log
+  back:

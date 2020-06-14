@@ -18,7 +18,6 @@ typedef struct {
 	ConfigOutput output_motion;
 	float detect_threshold;
 	char *detect_thumbnail;
-	char *detect_output;
 	char *detect_logfile;
 } ConfigCamera;
 

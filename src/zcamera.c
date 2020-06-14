@@ -6,18 +6,13 @@
 #include <libavutil/timestamp.h>
 #include <libavutil/pixdesc.h>
 
+#include <time.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 #define MAX_STREAMS 4
-#define MAX_SEGMENT_PACKETS 512
-
-typedef struct {
-	AVPacket *packet;
-	AVFrame *frame;
-} Packet;
 
 typedef struct {
 	AVFormatContext *fctx;
@@ -26,31 +21,26 @@ typedef struct {
 
 struct ZCamera {
 	const ConfigCamera *config;
-	//void *user_ptr;
 	pthread_t thread;
 	int close;
-
-	/* ZCameraKeyframeTestFunc test_func; */
-	/* void *user; */
 
 	struct {
 		AVFormatContext *fctx;
 	} in;
 
 	Output live;
-	Output motion;
 
 	struct {
 		AVCodecContext *ctx;
-		int skipped_frames;
-		AVFrame *prev;
 	} decode;
 
+#define PACKET_QUEUE_LEN 512
 	struct {
 		FILE *log;
 		int active;
-		Packet queue[256];
+		AVFrame *prev;
 		int cursor_read, cursor_write;
+		AVPacket queue[PACKET_QUEUE_LEN];
 	} detect;
 };
 
@@ -83,8 +73,11 @@ error:
 }
 
 static int outputOpen(Output *out, const ConfigOutput *config, const AVFormatContext *inctx) {
-	// TODO strftime url
-	const char *url = config->url;
+	char url[1024];
+	time_t now = time(NULL);
+	struct tm tm;
+	localtime_r(&now, &tm);
+	strftime(url, sizeof(url), config->url, &tm);
 
 	int averror = avformat_alloc_output_context2(&out->fctx, NULL, config->format, url);
 	if (0 != averror) {
@@ -121,13 +114,25 @@ static int outputOpen(Output *out, const ConfigOutput *config, const AVFormatCon
 		}
 	}
 
-	averror = avformat_write_header(out->fctx, (AVDictionary**)&config->options);
+	av_dump_format(out->fctx, 0, url, 1);
+
+	if (!(out->fctx->flags & AVFMT_NOFILE)) {
+		const int averr = avio_open(&out->fctx->pb, url, AVIO_FLAG_WRITE);
+		if (averr < 0) {
+			fprintf(stderr, "avio_open(%s) error: %s\n", url, av_err2str(averr));
+			goto error_close;
+		}
+	}
+
+	AVDictionary *options = NULL;
+	if (config->options)
+		av_dict_copy(&options, config->options, 0);
+	averror = avformat_write_header(out->fctx, options ? &options : NULL);
 	if (averror < 0) {
 			fprintf(stderr, "ERROR: cannot write header for output: %s\n", av_err2str(averror));
 			goto error_close;
 	}
 
-	av_dump_format(out->fctx, 0, url, 1);
 	return 0;
 
 error_close:
@@ -166,7 +171,14 @@ static int outputWrite(Output *out, const AVFormatContext *inctx, AVPacket *pkt)
 }
 
 static void outputClose(Output *out) {
+	if (!out->fctx)
+		return;
+
+	if (!(out->fctx->flags & AVFMT_NOFILE)) {
+		avio_closep(&out->fctx->pb);
+	}
 	avformat_free_context(out->fctx);
+	out->fctx = NULL;
 }
 
 static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
@@ -223,16 +235,36 @@ static int frameCompare(const AVFrame *a, const AVFrame *b, Yuv *retval) {
 	return 1;
 }
 
-static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
+static void processPacket(ZCamera *cam, const AVPacket *pkt) {
 	const AVStream *stream = cam->in.fctx->streams[pkt->stream_index];
 	const int is_video = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
 	const int is_keyframe = !!(pkt->flags & AV_PKT_FLAG_KEY);
 
+	// Store packet in a queue
+	{
+		const int next_write = (cam->detect.cursor_write + 1) % PACKET_QUEUE_LEN;
+		if (next_write == cam->detect.cursor_read) {
+			fprintf(stderr, "Camera %s queue depleted!\n", cam->config->name);
+			// FIXME what to do?
+			av_packet_unref(cam->detect.queue + cam->detect.cursor_read);
+			cam->detect.cursor_read = (cam->detect.cursor_read + 1) % PACKET_QUEUE_LEN;
+		}
+
+		av_packet_ref(cam->detect.queue + cam->detect.cursor_write, pkt);
+		cam->detect.cursor_write = next_write;
+	}
+
+	// We don't care about non-leyframes
 	if (!is_video || !is_keyframe) {
-		//cam->detect.segment
-		++cam->decode.skipped_frames;
 		return;
 	}
+
+	const int wr = cam->detect.cursor_write;
+	const int rd = cam->detect.cursor_read;
+	const int queue_len = (wr >= rd) ? wr - rd : wr + PACKET_QUEUE_LEN - rd;
+	fprintf(stderr, "P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], queue: %d\n",
+		(long long)pkt->pts, (long long)pkt->dts,
+		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, queue_len);
 
 	if (cam->decode.ctx == NULL) {
 		const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -245,12 +277,7 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 		}
 	}
 
-	fprintf(stderr, "P[ptd:%lld dts:%lld S:%d F:%x sz:%d pos:%lld dur:%lld], skipped: %d\n",
-		(long long)pkt->pts, (long long)pkt->dts,
-		pkt->stream_index, pkt->flags, pkt->size, (long long)pkt->pos, (long long)pkt->duration, cam->decode.skipped_frames);
-	cam->decode.skipped_frames = 0;
-
-	int averr = avcodec_send_packet(cam->decode.ctx, pkt);
+	const int averr = avcodec_send_packet(cam->decode.ctx, pkt);
 	if (averr < 0) {
 		fprintf(stderr, "Error decoding frame: %s", av_err2str(averr));
 		// return; ?
@@ -258,14 +285,19 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 
 	for (;;) {
 		AVFrame *frame = av_frame_alloc();
-		averr = avcodec_receive_frame(cam->decode.ctx, frame);
+		const int averr = avcodec_receive_frame(cam->decode.ctx, frame);
 		if (averr == AVERROR(EAGAIN) || averr == AVERROR_EOF) {
 			av_frame_free(&frame);
-			return;
+			break;
+		}
+		if (averr != 0) {
+			fprintf(stderr, "Error decoding frame: %s\n", av_err2str(averr));
+			av_frame_free(&frame);
+			break;
 		}
 
 		Yuv diff = { 0 };
-		const int comperr = frameCompare(cam->decode.prev, frame, &diff);
+		const int comperr = frameCompare(cam->detect.prev, frame, &diff);
 		int detected = 0;
 		if (0 >= comperr) {
 			fprintf(stderr, "Error comparing frames: %d\n", comperr);
@@ -281,12 +313,43 @@ static void analyzePacket(ZCamera *cam, const AVPacket *pkt) {
 			}
 		}
 
-		// TODO write segment if detected
+		if (detected) {
+			// TODO write thumbnail
+			cam->detect.active = 1;
+		}
 
-		av_frame_unref(cam->decode.prev);
-		av_frame_free(&cam->decode.prev);
-		cam->decode.prev = frame;
+		av_frame_unref(cam->detect.prev);
+		av_frame_free(&cam->detect.prev);
+		cam->detect.prev = frame;
 	}
+
+	Output motion = { 0 };
+	if (cam->detect.active) {
+		// TODO write segment if detected
+		if (0 != outputOpen(&motion, &cam->config->output_motion, cam->in.fctx)) {
+			fprintf(stderr, "Camera %s failed to open motion file for writing\n", cam->config->name);
+			motion.fctx = NULL;
+		}
+	}
+
+	// Dump or ignore queue
+	for (; cam->detect.cursor_read != cam->detect.cursor_write;
+			cam->detect.cursor_read = (cam->detect.cursor_read + 1) % PACKET_QUEUE_LEN) {
+		/* const int wr = cam->detect.cursor_write; */
+		/* const int rd = cam->detect.cursor_read; */
+		/* const int queue_len = (wr >= rd) ? wr - rd : wr + PACKET_QUEUE_LEN - rd; */
+		/* fprintf(stderr, "%s %d %d %d\n", cam->config->name, rd, wr, queue_len); */
+
+		AVPacket *packet = cam->detect.queue + cam->detect.cursor_read;
+		if (motion.fctx && 0 != outputWrite(&motion, cam->in.fctx, packet)) {
+			fprintf(stderr, "Camera %s failed writing a packet\n", cam->config->name);
+		}
+		av_packet_unref(packet);
+	}
+
+	outputClose(&motion);
+	cam->detect.active = 0;
+	return;
 
 error_close:
 	// FIXME stagger errors
@@ -304,7 +367,7 @@ static int readPacket(ZCamera *cam) {
 		return result;
 	}
 
-	analyzePacket(cam, &pkt);
+	processPacket(cam, &pkt);
 
 	if (!cam->live.fctx) {
 		// FIXME error check
@@ -337,8 +400,11 @@ static void *zCameraThreadFunc(void *param) {
 
 	fprintf(stderr, "Closing camera %s\n", cam->config->name);
 
-	// TODO close detect queue
-	av_frame_free(&cam->decode.prev);
+	for (int i = 0; i < PACKET_QUEUE_LEN; ++i) {
+		av_packet_unref(cam->detect.queue + i);
+	}
+
+	av_frame_free(&cam->detect.prev);
 	avcodec_close(cam->decode.ctx);
 	outputClose(&cam->live);
 	avformat_close_input(&cam->in.fctx);
