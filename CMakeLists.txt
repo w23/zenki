@@ -13,10 +13,6 @@ set(SOURCES
 	src/zcamera.c
 )
 
-if(USE_ATTO)
-	set(SOURCES ${SOURCES} src/texture.c)
-endif(USE_ATTO)
-
 add_executable(zenki ${SOURCES})
 target_link_libraries(zenki PRIVATE
 	Threads::Threads
@@ -25,9 +21,3 @@ target_link_libraries(zenki PRIVATE
 	PkgConfig::avcodec
 	PkgConfig::yaml
 )
-
-if(USE_ATTO)
-	add_subdirectory(src/atto)
-	target_compile_definitions(zenki PRIVATE USE_ATTO=1)
-	target_link_libraries(zenki atto)
-endif(USE_ATTO)
