@@ -242,7 +242,12 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	while (!g.exit) { sleep(1); }
+	while (!g.exit) {
+		sigset_t set;
+		sigemptyset(&set);
+		sigsuspend(&set);
+		fprintf(stderr, "Woke up\n");
+	}
 
 	for (int i = 0; i < config.ncameras; ++i) {
 		if (!g.cams[i])
