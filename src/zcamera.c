@@ -179,6 +179,8 @@ static void outputClose(Output *out) {
 	if (!out->fctx)
 		return;
 
+	av_write_trailer(out->fctx);
+
 	if (!(out->fctx->flags & AVFMT_NOFILE)) {
 		avio_closep(&out->fctx->pb);
 	}
@@ -380,6 +382,7 @@ static void processPacket(ZCamera *cam, const AVPacket *pkt) {
 				if (0 != outputWrite(&cam->detect.out, cam->in.fctx, packet)) {
 					fprintf(stderr, "Camera %s failed writing a packet\n", cam->config->name);
 				}
+				av_packet_unref(packet);
 			}
 			break;
 	}
