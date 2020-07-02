@@ -16,8 +16,13 @@
 #define MAX_STREAMS 4
 
 typedef struct {
+	int mapping;
+	int64_t prev_dts;
+} OutputStream;
+
+typedef struct {
 	AVFormatContext *fctx;
-	int stream_mapping[MAX_STREAMS];
+	OutputStream streams[MAX_STREAMS];
 } Output;
 
 #define PACKET_QUEUE_LEN 512
@@ -49,6 +54,16 @@ struct ZCamera {
 	} detect;
 };
 
+static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
+{
+	AVRational *time_base = &fmt_ctx->streams[pkt->stream_index]->time_base;
+	fprintf(stderr, "%s: pts:%s pts_time:%s dts:%s dts_time:%s duration:%s duration_time:%s stream_index:%d\n",
+		tag,
+		av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, time_base),
+		av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, time_base),
+		av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, time_base),
+		pkt->stream_index);
+}
 
 static int openCamera(ZCamera *cam) {
 	// TODO: stimeout for rtsp
@@ -91,7 +106,7 @@ static int outputOpen(Output *out, const ConfigOutput *config, const AVFormatCon
 	}
 
 	for (int i = 0; i < MAX_STREAMS; ++i)
-		out->stream_mapping[i] = -1;
+		out->streams[i].mapping = -1;
 
 	int mapped_index = 0;
 	for (int i = 0; i < inctx->nb_streams; ++i) {
@@ -104,7 +119,7 @@ static int outputOpen(Output *out, const ConfigOutput *config, const AVFormatCon
 		if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO && codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
 			continue;
 
-		out->stream_mapping[i] = mapped_index++;
+		out->streams[i].mapping = mapped_index++;
 
 		AVStream *stream = avformat_new_stream(out->fctx, NULL);
 		if (!stream) {
@@ -153,21 +168,31 @@ static int outputWrite(Output *out, const AVFormatContext *inctx, AVPacket *pkt)
 	if (!out->fctx)
 		return 0;
 
-	if (pkt->stream_index >= MAX_STREAMS || out->stream_mapping[pkt->stream_index] < 0) {
+	if (pkt->stream_index < 0 || pkt->stream_index >= MAX_STREAMS || out->streams[pkt->stream_index].mapping < 0) {
 		// skip packet
 		return 1;
 	}
 
+	OutputStream *outs = out->streams + pkt->stream_index;
 	AVStream *in_stream = inctx->streams[pkt->stream_index];
-	pkt->stream_index = out->stream_mapping[pkt->stream_index];
-	AVStream *out_stream = out->fctx->streams[pkt->stream_index];
+	AVStream *out_stream = out->fctx->streams[outs->mapping];
+	pkt->stream_index = outs->mapping;
 
-	pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-	pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
-	pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
-	//pkt.pos = -1;
+	av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
 
-	int averror = av_interleaved_write_frame(out->fctx, pkt);
+	const int64_t next_min_dts = outs->prev_dts + 1;
+	if (pkt->dts < next_min_dts) {
+		fprintf(stderr, "Unexpected DTS in packet: %"PRId64" < %"PRId64"\n", pkt->dts, next_min_dts);
+		if (pkt->pts >= pkt->dts)
+			pkt->pts = FFMAX(pkt->pts, next_min_dts);
+		pkt->dts = next_min_dts;
+	}
+
+	outs->prev_dts = pkt->dts;
+
+	//log_packet(inctx, pkt, "OUT");
+	const int averror = av_interleaved_write_frame(out->fctx, pkt);
+	//const int averror = av_write_frame(out->fctx, pkt);
 	if (averror < 0) {
 			fprintf(stderr, "Error muxing packet: %s\n", av_err2str(averror));
 			// FIXME handle error
@@ -186,17 +211,6 @@ static void outputClose(Output *out) {
 	}
 	avformat_free_context(out->fctx);
 	out->fctx = NULL;
-}
-
-static void log_packet(const AVFormatContext *fmt_ctx, const AVPacket *pkt, const char *tag)
-{
-    AVRational *time_base = &fmt_ctx->streams[pkt->stream_index]->time_base;
-    printf("%s: pts:%s pts_time:%s dts:%s dts_time:%s duration:%s duration_time:%s stream_index:%d\n",
-           tag,
-           av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, time_base),
-           av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, time_base),
-           av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, time_base),
-           pkt->stream_index);
 }
 
 static enum AVPixelFormat camNegotiateDecodePixelFormat(struct AVCodecContext *s, const enum AVPixelFormat * fmt) {
@@ -352,7 +366,8 @@ static void processPacket(ZCamera *cam, const AVPacket *pkt) {
 	}
 
 	switch (status) {
-		case NotDetected: /* already handled */ break;
+		case NotDetected: /* already handled */
+			break;
 		case Detected:
 			// Create context if not already
 			if (!cam->detect.out.fctx && 0 != outputOpen(&cam->detect.out, &cam->config->output_motion, cam->in.fctx)) {
@@ -404,6 +419,8 @@ static int readPacket(ZCamera *cam) {
 		// FIXME what to do here?
 		return result;
 	}
+
+	//log_packet(cam->in.fctx, &pkt, "IN");
 
 	processPacket(cam, &pkt);
 
